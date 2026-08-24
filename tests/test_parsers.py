@@ -182,3 +182,12 @@ def test_summary_humidity_wind():
     ]
     s = c.summarise(srcs, ["2026-09-06"])["2026-09-06"]
     assert s["hum"] == 65 and s["hum_n"] == 2 and s["wind"] == 10 and s["wind_n"] == 2 and s["wdir"] == "SW"
+
+
+def test_sun_times_red_bank_sept_6():
+    st = c.sun_times("2026-09-06")
+    # timeanddate.com for Red Bank, NJ on 2026-09-06: sunrise ~6:27am, sunset ~7:20pm EDT
+    assert st["sunrise"] in ("06:26", "06:27", "06:28")
+    assert st["sunset"] in ("19:19", "19:20", "19:21")
+    h, m = map(int, st["golden_start"].split(":"))
+    assert 18 * 60 + 20 <= h * 60 + m <= 18 * 60 + 45   # ~40-55 min before sunset in September

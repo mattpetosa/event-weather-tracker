@@ -489,6 +489,49 @@ SOURCES = [
 ]
 
 # ----------------------------------------------------------------------------
+# sun times (NOAA solar equations; accurate to a minute or so)
+# ----------------------------------------------------------------------------
+import math
+
+
+def _sun_event_utc_hours(date, lat, lon, elev_deg, rising):
+    """UTC decimal hour when the sun's centre is at elev_deg on `date`
+    (-0.833 = standard sunrise/sunset incl. refraction, 6 = golden hour)."""
+    y, m, d = (int(x) for x in date.split("-"))
+    n = datetime(y, m, d).timetuple().tm_yday
+    for guess in (12.0 - lon / 15.0,):
+        for _ in range(3):  # iterate: fractional year depends on the time of day
+            gamma = 2 * math.pi / 365 * (n - 1 + (guess - 12) / 24)
+            eqtime = 229.18 * (0.000075 + 0.001868 * math.cos(gamma) - 0.032077 * math.sin(gamma)
+                               - 0.014615 * math.cos(2 * gamma) - 0.040849 * math.sin(2 * gamma))
+            decl = (0.006918 - 0.399912 * math.cos(gamma) + 0.070257 * math.sin(gamma)
+                    - 0.006758 * math.cos(2 * gamma) + 0.000907 * math.sin(2 * gamma)
+                    - 0.002697 * math.cos(3 * gamma) + 0.00148 * math.sin(3 * gamma))
+            lat_r = math.radians(lat)
+            cos_ha = ((math.cos(math.radians(90 - elev_deg)) / (math.cos(lat_r) * math.cos(decl)))
+                      - math.tan(lat_r) * math.tan(decl))
+            if abs(cos_ha) > 1:
+                return None
+            ha = math.degrees(math.acos(cos_ha)) * (1 if rising else -1)
+            guess = (720 - 4 * (lon + ha) - eqtime) / 60.0
+        return guess
+    return None
+
+
+def sun_times(date, lat=LOCATION["lat"], lon=LOCATION["lon"]):
+    def local(h):
+        if h is None:
+            return None
+        base = datetime(*(int(x) for x in date.split("-")), tzinfo=timezone.utc)
+        return (base + timedelta(hours=h)).astimezone(TZ).strftime("%H:%M")
+    return {
+        "sunrise": local(_sun_event_utc_hours(date, lat, lon, -0.833, True)),
+        "sunset": local(_sun_event_utc_hours(date, lat, lon, -0.833, False)),
+        "golden_start": local(_sun_event_utc_hours(date, lat, lon, 6, False)),
+    }
+
+
+# ----------------------------------------------------------------------------
 # aggregation
 # ----------------------------------------------------------------------------
 
@@ -542,6 +585,7 @@ def summarise(sources, days=EVENT_DAYS):
             "cond": conds[0] if conds else None,
             "hourly": hourly,
             "hourly_available": any(x["n"] for x in hourly),
+            "sun": sun_times(date),
         }
     return summary
 

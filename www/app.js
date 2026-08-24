@@ -27,6 +27,11 @@
     if (h === 12) return "noon";
     return h < 12 ? h + "am" : (h - 12) + "pm";
   }
+  function fmtClock(hhmm) {
+    if (!hhmm) return "—";
+    const [h, m] = hhmm.split(":").map(Number);
+    return ((h + 11) % 12 + 1) + ":" + String(m).padStart(2, "0") + (h < 12 ? "am" : "pm");
+  }
   function deg(v) { return v == null ? "—" : v + "°"; }
   function fmtDay(iso) { const d = parseDay(iso); return MON[d.getMonth()] + " " + d.getDate(); }
 
@@ -121,6 +126,13 @@
           li.innerHTML = label + " <b>" + val + "</b>";
           ul.appendChild(li);
         });
+        if (s.sun && s.sun.sunset) {
+          const sunEl = $(".sun", v);
+          sunEl.hidden = false;
+          sunEl.innerHTML = "Sunset <b>" + fmtClock(s.sun.sunset) + "</b> · golden hour <b>" +
+            fmtClock(s.sun.golden_start) + "–" + fmtClock(s.sun.sunset) + "</b> — starts as cocktail hour winds down, the window for river portraits.";
+          v.appendChild(sunEl);
+        }
         if (known) {
           const basis = document.createElement("p");
           basis.className = "basis";

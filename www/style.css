@@ -174,4 +174,6 @@ h1 span { font-weight: 400; color: var(--ink-2); font-size: .72em; }
 .factors li.watch::before { background: #E0A100; }
 .factors li.concern::before { background: #C44; }
 .factors li b { color: var(--ink); font-weight: 600; }
+.verdict .sun { margin: 8px 0 0; padding-top: 8px; border-top: 1px solid rgba(122,95,14,.18); font-size: 13px; color: var(--ink-2); }
+.verdict .sun b { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
 .verdict .basis { margin: 6px 0 0; font-size: 11px; color: var(--ink-3); }
