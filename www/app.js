@@ -6,7 +6,7 @@
   // Thresholds for a seated, dressed-up crowd in late-afternoon sun: [good max, watch max]
   const RULES = {
     rain: { good: 20, watch: 35 },
-    wind: { good: 10, watch: 15 },
+    wind: { good: 8, watch: 12 },   // waterfront lawn at the Molly Pitcher Inn: exposed to the river breeze
     hum:  { good: 65, watch: 70 },
   };
   function grade(v, r) { return v == null ? null : v <= r.good ? "good" : v <= r.watch ? "watch" : "concern"; }
@@ -94,6 +94,9 @@
           ? { rain: Math.max(...lead.map(h => h.pop)), wind: avgOf(win, "wind") ?? s.wind, hum: avgOf(win, "hum") ?? s.hum, temp: avgOf(win, "temp") ?? s.hi }
           : { rain: s.pop, wind: s.wind, hum: s.hum, temp: s.hi };
         const g = { rain: grade(f.rain, RULES.rain), wind: grade(f.wind, RULES.wind), hum: grade(f.hum, RULES.hum), temp: gradeTemp(f.temp) };
+        // An easterly comes straight up the Navesink at the lawn — gustier and cooler than the town number.
+        const onshore = /^E|^NE|^SE/.test(s.wdir || "");
+        if (onshore && g.wind === "good") g.wind = "watch";
         const names = { rain: "rain", wind: "wind", hum: "humidity", temp: "temperature" };
         const concerns = Object.keys(g).filter(k => g[k] === "concern").map(k => names[k]);
         const watches = Object.keys(g).filter(k => g[k] === "watch").map(k => names[k]);
@@ -101,7 +104,7 @@
         let text;
         if (!known) text = "No forecast for the ceremony window yet";
         else if (concerns.length) text = "Concern: " + concerns.join(", ");
-        else if (watches.length) text = "Good — keep an eye on " + watches.join(" and ");
+        else if (watches.length) text = "Good — keep an eye on " + watches.join(" and ") + (onshore && watches.includes("wind") ? " (onshore)" : "");
         else text = "Ideal so far";
         const v = $(".verdict", node);
         v.hidden = false;
@@ -122,7 +125,7 @@
           const basis = document.createElement("p");
           basis.className = "basis";
           basis.textContent = hourlyBasis
-            ? "Rain is the peak chance from 2pm through the ceremony; wind, humidity and temperature are the 4–6pm average."
+            ? "Rain is the peak chance from 2pm through the ceremony; wind, humidity and temperature are the 4–6pm average. Wind limits are tightened for the riverside lawn, and an easterly off the bay counts as a watch."
             : "Based on the day's averages until hourly forecasts reach this date.";
           v.appendChild(basis);
         }
