@@ -2,6 +2,7 @@
   "use strict";
   const $ = (s, r) => (r || document).querySelector(s);
   const DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const KEY_WINDOW = { from: 16, to: 18, label: "Ceremony & cocktail hour, 4:30–6:30pm" };
   const MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
   function parseDay(iso) {
@@ -74,16 +75,24 @@
       const hours = $(".hours", node);
       s.hourly.forEach(h => {
         const b = document.createElement("div");
-        b.className = "h" + (h.pop == null ? " na" : "") + ((h.h < 6 || h.h >= 21) ? " night" : "");
+        const inWindow = isKey && h.h >= KEY_WINDOW.from && h.h <= KEY_WINDOW.to;
+        b.className = "h" + (h.pop == null ? " na" : "") + ((h.h < 6 || h.h >= 21) ? " night" : "") + (inWindow ? " gold" : "");
         b.style.height = h.pop == null ? "2px" : Math.max(2, h.pop) + "%";
         b.title = hourLabel(h.h) + ": " + (h.pop == null ? "no hourly data" : h.pop + "% · " + h.n + " src" + (h.temp != null ? " · " + h.temp + "°" : ""));
-        if (h.pop != null && h.h % 3 === 0) {
+        const nearWindow = isKey && h.h >= KEY_WINDOW.from - 1 && h.h <= KEY_WINDOW.to + 1;
+        if (h.pop != null && (inWindow || (h.h % 3 === 0 && !nearWindow))) {
           const l = document.createElement("span");
-          l.className = "lbl"; l.textContent = h.pop;
+          l.className = "lbl"; l.textContent = h.pop + "%";
           b.appendChild(l);
         }
         hours.appendChild(b);
       });
+      if (isKey && s.hourly_available) {
+        const cap = document.createElement("p");
+        cap.className = "window-cap";
+        cap.innerHTML = '<span class="swatch"></span>' + KEY_WINDOW.label;
+        $(".hour-axis", node).after(cap);
+      }
       if (!s.hourly_available) {
         const p = document.createElement("p");
         p.className = "meta"; p.textContent = "No source has published hourly detail this far out yet.";
