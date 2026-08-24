@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex">
+<title>Red Bank Weekend Weather · Sept 4–7</title>
+<meta name="theme-color" content="#E8EEF3">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&family=Instrument+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css?v=1">
+</head>
+<body>
+<header class="masthead">
+  <p class="eyebrow">Red Bank, New Jersey</p>
+  <h1>Rain outlook<br><span>Sept 4 – 7</span></h1>
+  <p class="status" id="status">Loading forecasts…</p>
+</header>
+
+<main id="days" class="days" aria-live="polite"></main>
+
+<section class="method">
+  <h2>How this number is made</h2>
+  <p>Every hour this page pulls the forecast for Red Bank from each source below and averages the daily chance of rain across whichever ones cover that day. The bar fills to the average; the faint band behind it shows the lowest and highest chance any single source gives, so a short band means the sources agree.</p>
+  <p>Tap a day to see the chance hour by hour (averaged across the sources that publish hourly detail) and every source's own number.</p>
+  <ul class="sources" id="sources"></ul>
+</section>
+
+<footer class="foot">
+  <p id="generated"></p>
+</footer>
+
+<template id="day-tpl">
+  <article class="day" tabindex="0" role="button" aria-expanded="false">
+    <div class="day-head">
+      <div class="when">
+        <span class="dow"></span>
+        <span class="date"></span>
+      </div>
+      <div class="temps"><span class="hi"></span><span class="lo"></span></div>
+    </div>
+    <p class="cond"></p>
+    <div class="pop-row">
+      <span class="pop-num"></span>
+      <span class="pop-label">chance of rain</span>
+    </div>
+    <div class="bar" aria-hidden="true">
+      <span class="band"></span>
+      <span class="fill"></span>
+      <span class="tick"></span>
+    </div>
+    <p class="meta"></p>
+    <div class="detail" hidden>
+      <h3>By the hour</h3>
+      <div class="hours"></div>
+      <div class="hour-axis"><span>12am</span><span>6am</span><span>noon</span><span>6pm</span><span>11pm</span></div>
+      <h3>Each source</h3>
+      <ul class="per-source"></ul>
+    </div>
+  </article>
+</template>
+
+<script src="app.js?v=1"></script>
+</body>
+</html>
