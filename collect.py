@@ -57,6 +57,50 @@ def _f_from_c(c):
     return None if c is None else _int(c * 9 / 5 + 32)
 
 
+_CARDINALS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+
+
+def _cardinal(deg):
+    if deg is None:
+        return None
+    return _CARDINALS[int((float(deg) + 22.5) // 45) % 8]
+
+
+_WIND_TEXT = re.compile(r'(?:([NSEW]{1,3})\s+)?(\d+)(?:\s*to\s*(\d+))?\s*mph', re.I)
+
+
+def _wind_from_text(text):
+    """'SW 7 mph' / '5 to 10 mph' / '7 mph' -> (mph, cardinal|None)."""
+    if not text:
+        return None, None
+    m = _WIND_TEXT.search(text)
+    if not m:
+        return None, None
+    lo, hi = int(m.group(2)), int(m.group(3) or m.group(2))
+    return round((lo + hi) / 2), (m.group(1).upper() if m.group(1) else None)
+
+
+def _mode(vals):
+    vals = [v for v in vals if v]
+    return max(set(vals), key=vals.count) if vals else None
+
+
+def fill_daily_from_hourly(daily, hourly):
+    """Give every daily entry hum/wind/wdir, deriving from the daytime hours
+    when the source did not publish a daily figure itself."""
+    for date, entry in daily.items():
+        hrs = [v for h, v in (hourly.get(date) or {}).items() if int(h) in DAY_WINDOW]
+        hums = [v.get("hum") for v in hrs if v.get("hum") is not None]
+        winds = [v.get("wind") for v in hrs if v.get("wind") is not None]
+        if entry.get("hum") is None:
+            entry["hum"] = _int(sum(hums) / len(hums)) if len(hums) >= 6 else None
+        if entry.get("wind") is None:
+            entry["wind"] = _int(sum(winds) / len(winds)) if len(winds) >= 6 else None
+        if entry.get("wdir") is None:
+            entry["wdir"] = _mode([v.get("wdir") for v in hrs]) if len(hrs) >= 6 else None
+    return daily
+
+
 def _local_date_hour(iso: str):
     """ISO timestamp (with offset or Z) -> (local 'YYYY-MM-DD', hour)."""
     s = iso.replace("Z", "+00:00")
@@ -97,11 +141,15 @@ def parse_twc_daily(d):
         if pop is None:  # today's daytime part expires after ~3pm local
             pop = dp["precipChance"][night_i]
             cond = dp["wxPhraseLong"][night_i]
+        part = day_i if dp["relativeHumidity"][day_i] is not None else night_i
         daily[date] = {
             "pop": _int(pop),
             "hi": _int(d["calendarDayTemperatureMax"][i]),
             "lo": _int(d["calendarDayTemperatureMin"][i]),
             "cond": cond,
+            "hum": _int(dp["relativeHumidity"][part]),
+            "wind": _int(dp["windSpeed"][part]),
+            "wdir": dp["windDirectionCardinal"][part],
         }
     return daily
 
@@ -111,7 +159,10 @@ def parse_twc_hourly(d):
     for i, ts in enumerate(d["validTimeLocal"]):
         date, hour = _local_date_hour(ts)
         hourly[date][hour] = {"pop": _int(d["precipChance"][i]),
-                              "temp": _int(d["temperature"][i])}
+                              "temp": _int(d["temperature"][i]),
+                              "hum": _int(d["relativeHumidity"][i]),
+                              "wind": _int(d["windSpeed"][i]),
+                              "wdir": d["windDirectionCardinal"][i]}
     return hourly
 
 
@@ -128,10 +179,16 @@ def parse_openmeteo(d):
         }
     hl = d.get("hourly", {})
     pops = hl.get("precipitation_probability") or []
+    hums = hl.get("relative_humidity_2m") or []
+    winds = hl.get("wind_speed_10m") or []
+    dirs = hl.get("wind_direction_10m") or []
     for i, ts in enumerate(hl.get("time", [])):
         date, hour = ts[:10], int(ts[11:13])
         hourly[date][hour] = {"pop": _int(pops[i]) if i < len(pops) else None,
-                              "temp": _int(hl["temperature_2m"][i])}
+                              "temp": _int(hl["temperature_2m"][i]),
+                              "hum": _int(hums[i]) if i < len(hums) else None,
+                              "wind": _int(winds[i]) if i < len(winds) else None,
+                              "wdir": _cardinal(dirs[i]) if i < len(dirs) else None}
     return daily, hourly
 
 
@@ -149,11 +206,14 @@ def parse_nws_daily(d):
     for p in d["properties"]["periods"]:
         date, _ = _local_date_hour(p["startTime"])
         pop = (p.get("probabilityOfPrecipitation") or {}).get("value")
-        entry = daily.setdefault(date, {"pop": None, "hi": None, "lo": None, "cond": None})
+        entry = daily.setdefault(date, {"pop": None, "hi": None, "lo": None, "cond": None,
+                                        "hum": None, "wind": None, "wdir": None})
         if p["isDaytime"]:
             entry["hi"] = _int(p["temperature"])
             entry["pop"] = _int(pop)
             entry["cond"] = p.get("shortForecast")
+            entry["wind"], entry["wdir"] = _wind_from_text(p.get("windSpeed"))
+            entry["wdir"] = entry["wdir"] or p.get("windDirection")
         else:
             entry["lo"] = _int(p["temperature"])
             if entry["pop"] is None:
@@ -168,7 +228,10 @@ def parse_nws_hourly(d):
     for p in d["properties"]["periods"]:
         date, hour = _local_date_hour(p["startTime"])
         pop = (p.get("probabilityOfPrecipitation") or {}).get("value")
-        hourly[date][hour] = {"pop": _int(pop), "temp": _int(p["temperature"])}
+        wind, _ = _wind_from_text(p.get("windSpeed"))
+        hourly[date][hour] = {"pop": _int(pop), "temp": _int(p["temperature"]),
+                              "hum": _int((p.get("relativeHumidity") or {}).get("value")),
+                              "wind": wind, "wdir": p.get("windDirection")}
     return hourly
 
 
@@ -183,9 +246,14 @@ def parse_metno(d):
     for ts in d["properties"]["timeseries"]:
         date, hour = _local_date_hour(ts["time"])
         data = ts["data"]
-        t = data["instant"]["details"].get("air_temperature")
+        inst = data["instant"]["details"]
+        t = inst.get("air_temperature")
         if t is not None:
-            hourly[date][hour] = {"pop": None, "temp": _f_from_c(t)}
+            ws = inst.get("wind_speed")
+            hourly[date][hour] = {"pop": None, "temp": _f_from_c(t),
+                                  "hum": _int(inst.get("relative_humidity")),
+                                  "wind": _int(ws * 2.23694) if ws is not None else None,
+                                  "wdir": _cardinal(inst.get("wind_from_direction"))}
         six = (data.get("next_6_hours") or {}).get("details") or {}
         if "air_temperature_max" in six and "air_temperature_min" in six:
             # a 6h block starting at 18:00+ local mostly belongs to the night → still that date
@@ -204,6 +272,8 @@ _ACCU_HI = re.compile(r'class="high">\s*(-?\d+)')
 _ACCU_LO = re.compile(r'class="low">\s*/\s*(-?\d+)')
 _ACCU_POP = re.compile(r'class="precip">.*?(\d+)%', re.S)
 _ACCU_PHRASE = re.compile(r'class="phrase">([^<]*)<')
+_ACCU_WIND = re.compile(r'Wind<span class="value">([^<]+)<')
+_ACCU_HUM = re.compile(r'Humidity<span class="value">\s*(\d+)%')
 
 
 def parse_accuweather_daily(page: str, year_hint: int | None = None):
@@ -225,11 +295,14 @@ def parse_accuweather_daily(page: str, year_hint: int | None = None):
         hi, lo, pop = _ACCU_HI.search(card), _ACCU_LO.search(card), _ACCU_POP.search(card)
         tail = page[m.end():m.end() + 2500]
         ph = _ACCU_PHRASE.search(tail)
+        wm = _ACCU_WIND.search(tail)
+        wind, wdir = _wind_from_text(html.unescape(wm.group(1)) if wm else None)
         daily[date] = {
             "pop": _int(pop.group(1)) if pop else None,
             "hi": _int(hi.group(1)) if hi else None,
             "lo": _int(lo.group(1)) if lo else None,
             "cond": html.unescape(ph.group(1).strip()) if ph else None,
+            "hum": None, "wind": wind, "wdir": wdir,
         }
     return daily
 
@@ -247,9 +320,14 @@ def parse_accuweather_hourly(page: str):
         dt = datetime.fromtimestamp(epoch, tz=timezone.utc).astimezone(TZ)
         pop = _ACCU_POP.search(body)
         temp = _ACCU_HTEMP.search(body)
+        hm = _ACCU_HUM.search(body)
+        wm = _ACCU_WIND.search(body)
+        wind, wdir = _wind_from_text(html.unescape(wm.group(1)) if wm else None)
         hourly[dt.strftime("%Y-%m-%d")][dt.hour] = {
             "pop": _int(pop.group(1)) if pop else None,
             "temp": _int(temp.group(1)) if temp else None,
+            "hum": _int(hm.group(1)) if hm else None,
+            "wind": wind, "wdir": wdir,
         }
     return hourly
 
@@ -267,26 +345,34 @@ def parse_ensemble(d):
     h = d["hourly"]
     members = sorted(k for k in h if k.startswith("precipitation"))
     temps = sorted(k for k in h if k.startswith("temperature_2m"))
+    hums = sorted(k for k in h if k.startswith("relative_humidity_2m"))
+    winds = sorted(k for k in h if k.startswith("wind_speed_10m"))
+
+    def _mean(keys, i):
+        vals = [h[k][i] for k in keys if h[k][i] is not None]
+        return sum(vals) / len(vals) if vals else None
     if not members:
         raise ValueError("no ensemble members in response")
     by_day = defaultdict(list)  # date -> [(hour, [precip per member], [temp per member])]
     for i, ts in enumerate(h["time"]):
         date, hour = ts[:10], int(ts[11:13])
-        by_day[date].append((hour, [h[m][i] for m in members], [h[t][i] for t in temps]))
+        by_day[date].append((hour, [h[m][i] for m in members], [h[t][i] for t in temps],
+                             _mean(hums, i), _mean(winds, i)))
     daily, hourly = {}, _hourly_dict()
     n = len(members)
     for date, rows in by_day.items():
         day_totals = [0.0] * n
         t_hi, t_lo = [], []
         valid_hours = 0
-        for hour, precs, tmps in rows:
+        for hour, precs, tmps, hum, wind in rows:
             if any(p is None for p in precs):
                 continue
             valid_hours += 1
             wet = sum(1 for p in precs if p >= HOURLY_THRESHOLD_MM)
             tv = [t for t in tmps if t is not None]
             mean_t = sum(tv) / len(tv) if tv else None  # member mean, not the extreme member
-            hourly[date][hour] = {"pop": round(100 * wet / n), "temp": _int(mean_t)}
+            hourly[date][hour] = {"pop": round(100 * wet / n), "temp": _int(mean_t),
+                                  "hum": _int(hum), "wind": _int(wind), "wdir": None}
             if hour in DAY_WINDOW:
                 for k, p in enumerate(precs):
                     day_totals[k] += p
@@ -322,9 +408,9 @@ def fetch_openmeteo(model, lon=None):
         q = urllib.parse.urlencode({
             "latitude": LOCATION["lat"], "longitude": lon or LOCATION["lon"],
             "daily": "precipitation_probability_max,temperature_2m_max,temperature_2m_min,weather_code",
-            "hourly": "precipitation_probability,temperature_2m",
+            "hourly": "precipitation_probability,temperature_2m,relative_humidity_2m,wind_speed_10m,wind_direction_10m",
             "forecast_days": 16, "timezone": "America/New_York",
-            "temperature_unit": "fahrenheit", "models": model})
+            "temperature_unit": "fahrenheit", "wind_speed_unit": "mph", "models": model})
         return parse_openmeteo(http_json("https://api.open-meteo.com/v1/forecast?" + q))
     return _f
 
@@ -333,8 +419,9 @@ def fetch_ensemble(model, lon=None):
     def _f():
         q = urllib.parse.urlencode({
             "latitude": LOCATION["lat"], "longitude": lon or LOCATION["lon"],
-            "hourly": "precipitation,temperature_2m", "forecast_days": 16,
-            "timezone": "America/New_York", "temperature_unit": "fahrenheit", "models": model})
+            "hourly": "precipitation,temperature_2m,relative_humidity_2m,wind_speed_10m", "forecast_days": 16,
+            "timezone": "America/New_York", "temperature_unit": "fahrenheit",
+            "wind_speed_unit": "mph", "models": model})
         return parse_ensemble(http_json("https://ensemble-api.open-meteo.com/v1/ensemble?" + q))
     return _f
 
@@ -413,9 +500,11 @@ def _avg(vals):
 def summarise(sources, days=EVENT_DAYS):
     summary = {}
     for date in days:
-        pops, his, los, conds = [], [], [], []
+        pops, his, los, conds, hums, winds, wdirs = [], [], [], [], [], [], []
         per_hour = defaultdict(list)
         per_hour_temp = defaultdict(list)
+        per_hour_hum = defaultdict(list)
+        per_hour_wind = defaultdict(list)
         for s in sources:
             if not s.get("ok"):
                 continue
@@ -424,9 +513,12 @@ def summarise(sources, days=EVENT_DAYS):
                 pops.append(d["pop"]); his.append(d["hi"]); los.append(d["lo"])
                 if d.get("cond"):
                     conds.append(d["cond"])
+                hums.append(d.get("hum")); winds.append(d.get("wind")); wdirs.append(d.get("wdir"))
             for h, v in (s["hourly"].get(date) or {}).items():
                 per_hour[int(h)].append(v.get("pop"))
                 per_hour_temp[int(h)].append(v.get("temp"))
+                per_hour_hum[int(h)].append(v.get("hum"))
+                per_hour_wind[int(h)].append(v.get("wind"))
         pop, pop_n = _avg(pops)
         hi, _ = _avg(his)
         lo, _ = _avg(los)
@@ -434,13 +526,17 @@ def summarise(sources, days=EVENT_DAYS):
         for h in range(24):
             p, n = _avg(per_hour.get(h, []))
             t, _ = _avg(per_hour_temp.get(h, []))
-            hourly.append({"h": h, "pop": p, "n": n, "temp": t})
+            hu, _ = _avg(per_hour_hum.get(h, []))
+            wi, _ = _avg(per_hour_wind.get(h, []))
+            hourly.append({"h": h, "pop": p, "n": n, "temp": t, "hum": hu, "wind": wi})
         valid = [v for v in pops if v is not None]
         summary[date] = {
             "pop": pop, "pop_n": pop_n,
             "pop_min": min(valid) if valid else None,
             "pop_max": max(valid) if valid else None,
             "hi": hi, "lo": lo,
+            "hum": _avg(hums)[0], "hum_n": _avg(hums)[1],
+            "wind": _avg(winds)[0], "wind_n": _avg(winds)[1], "wdir": _mode(wdirs),
             # first source in priority order with a human-written phrase; the
             # four Open-Meteo model rows would otherwise outvote weather.com/AccuWeather/NWS
             "cond": conds[0] if conds else None,
@@ -457,6 +553,7 @@ def collect(sources=SOURCES, days=EVENT_DAYS, verbose=True):
         t0 = time.time()
         try:
             daily, hourly = src["fetch"]()
+            fill_daily_from_hourly(daily, hourly)
             entry.update({
                 "ok": True, "error": None,
                 "daily": {d: daily[d] for d in days if d in daily},
@@ -513,5 +610,6 @@ if __name__ == "__main__":
     print(f"\n{ok}/{len(res['sources'])} sources ok. Summary:")
     for d in res["days"]:
         s = res["summary"][d]
-        print(f"  {d}: rain {s['pop']}% (n={s['pop_n']}, {s['pop_min']}–{s['pop_max']})  {s['lo']}–{s['hi']}°F  {s['cond']}")
+        print(f"  {d}: rain {s['pop']}% (n={s['pop_n']}, {s['pop_min']}–{s['pop_max']})  {s['lo']}–{s['hi']}°F  "
+              f"hum {s['hum']}% (n={s['hum_n']})  wind {s['wind']} mph {s['wdir'] or ''} (n={s['wind_n']})  {s['cond']}")
     sys.exit(0 if ok else 1)

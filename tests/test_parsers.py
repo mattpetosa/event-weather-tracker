@@ -58,7 +58,7 @@ def test_metno_temps_only_and_partial_days_dropped():
 def test_accuweather_daily_cards():
     d = c.parse_accuweather_daily(fx("accuweather_daily.html"), year_hint=2026)
     assert len(d) == 15
-    assert d["2026-08-24"] == {"pop": 25, "hi": 81, "lo": 62, "cond": "Partly sunny"}
+    assert d["2026-08-24"] == {"pop": 25, "hi": 81, "lo": 62, "cond": "Partly sunny", "hum": None, "wind": 7, "wdir": "SW"}
     assert d["2026-08-25"]["pop"] == 3
     for day in c.EVENT_DAYS:
         assert day in d and d[day]["pop"] is not None, day
@@ -89,7 +89,7 @@ def test_summary_averages_only_available_values():
     d = s["2026-09-06"]
     assert d["pop"] == 30 and d["pop_n"] == 2 and d["pop_min"] == 20 and d["pop_max"] == 40
     assert d["hi"] == 82 and d["lo"] == 61 and d["cond"] == "Sunny"
-    assert d["hourly"][12] == {"h": 12, "pop": 20, "n": 2, "temp": 78}
+    assert d["hourly"][12] == {"h": 12, "pop": 20, "n": 2, "temp": 78, "hum": None, "wind": None}
     assert d["hourly"][0]["pop"] is None
     assert s["2026-09-07"]["pop"] is None and s["2026-09-07"]["hourly_available"] is False
 
@@ -126,6 +126,59 @@ def test_ensemble_synthetic_counts():
     base["precipitation_member04"] = [0.005] * 24 # trace below both bars: never counts
     d, h = c.parse_ensemble({"hourly": base})
     assert d["2026-09-06"]["pop"] == 50           # members 1 and 3
+    assert d["2026-09-06"]["hi"] is None and h["2026-09-06"][12]["hum"] is None
     assert h["2026-09-06"][12]["pop"] == 50       # members 1 and 3
     assert h["2026-09-06"][3]["pop"] == 50        # members 2 and 3
     assert h["2026-09-06"][5]["pop"] == 25        # member 3 only
+
+
+def test_wind_text_forms():
+    assert c._wind_from_text("SW 7 mph") == (7, "SW")
+    assert c._wind_from_text("5 to 10 mph") == (8, None)
+    assert c._wind_from_text("W 8 mph") == (8, "W")
+    assert c._wind_from_text(None) == (None, None)
+    assert c._cardinal(242.7) == "SW" and c._cardinal(0) == "N" and c._cardinal(350) == "N" and c._cardinal(100) == "E"
+
+def test_humidity_wind_per_source():
+    d = c.parse_twc_daily(fx("twc_daily.json"))
+    assert 0 < d["2026-09-06"]["hum"] <= 100 and d["2026-09-06"]["wind"] >= 0 and d["2026-09-06"]["wdir"]
+    h = c.parse_twc_hourly(fx("twc_hourly.json"))
+    assert h["2026-09-06"][12]["hum"] and h["2026-09-06"][12]["wdir"]
+    nd = c.parse_nws_daily(fx("nws_daily.json"))
+    assert nd["2026-08-25"]["wind"] == 5 and nd["2026-08-25"]["wdir"] == "W"
+    nh = c.parse_nws_hourly(fx("nws_hourly.json"))
+    assert nh["2026-08-24"][18]["hum"] == 54 and nh["2026-08-24"][18]["wind"] == 5
+    _, mh = c.parse_metno(fx("metno.json"))
+    v = next(iter(mh["2026-08-25"].values()))
+    assert 0 < v["hum"] <= 100 and v["wind"] >= 0 and v["wdir"] in c._CARDINALS
+    _, om = c.parse_openmeteo(fx("openmeteo_ecmwf.json"))
+    assert om["2026-09-06"][12]["hum"] and om["2026-09-06"][12]["wdir"]
+    ah = c.parse_accuweather_hourly(fx("accuweather_hourly_day2.html"))
+    v = next(iter(ah["2026-08-25"].values()))
+    assert v["hum"] and v["wind"] == 7 and v["wdir"] == "W"
+    ed, eh = c.parse_ensemble(fx("ensemble_ecmwf.json"))
+    assert eh["2026-09-06"][12]["hum"] and eh["2026-09-06"][12]["wind"] is not None
+
+def test_fill_daily_from_hourly_uses_daytime_only():
+    daily = {"2026-09-06": {"pop": 10, "hi": 80, "lo": 60, "cond": None}}
+    hourly = {"2026-09-06": {h: {"hum": 90 if h < 6 else 50, "wind": 20 if h < 6 else 10, "wdir": "N" if h < 6 else "SW"} for h in range(24)}}
+    c.fill_daily_from_hourly(daily, hourly)
+    e = daily["2026-09-06"]
+    assert e["hum"] == 50 and e["wind"] == 10 and e["wdir"] == "SW"
+    # a published daily figure is kept
+    daily = {"2026-09-06": {"pop": 10, "hi": 80, "lo": 60, "cond": None, "hum": 70, "wind": 3, "wdir": "E"}}
+    c.fill_daily_from_hourly(daily, hourly)
+    assert daily["2026-09-06"]["hum"] == 70 and daily["2026-09-06"]["wdir"] == "E"
+    # too few hours → None, not a guess
+    daily = {"2026-09-06": {"pop": 10, "hi": 80, "lo": 60, "cond": None}}
+    c.fill_daily_from_hourly(daily, {"2026-09-06": {12: {"hum": 50, "wind": 1, "wdir": "S"}}})
+    assert daily["2026-09-06"]["hum"] is None and daily["2026-09-06"]["wdir"] is None
+
+def test_summary_humidity_wind():
+    srcs = [
+        {"ok": True, "daily": {"2026-09-06": {"pop": 20, "hi": 80, "lo": 60, "cond": "Sunny", "hum": 60, "wind": 8, "wdir": "SW"}}, "hourly": {}},
+        {"ok": True, "daily": {"2026-09-06": {"pop": 30, "hi": 80, "lo": 60, "cond": None, "hum": 70, "wind": None, "wdir": "SW"}}, "hourly": {}},
+        {"ok": True, "daily": {"2026-09-06": {"pop": 30, "hi": 80, "lo": 60, "cond": None, "hum": None, "wind": 12, "wdir": "W"}}, "hourly": {}},
+    ]
+    s = c.summarise(srcs, ["2026-09-06"])["2026-09-06"]
+    assert s["hum"] == 65 and s["hum_n"] == 2 and s["wind"] == 10 and s["wind_n"] == 2 and s["wdir"] == "SW"

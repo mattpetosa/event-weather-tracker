@@ -15,6 +15,8 @@ pulls the Red Bank forecast from ten sources, averages the daily chance of rain
 | ecmwf / gfs / gem / openmeteo | ECMWF, GFS, GEM, Open-Meteo blend | Open-Meteo `models=` | 16 days (GEM temps 10 days; ECMWF queried at lon -74.15 because its cell at -74.06 is ocean) |
 | metno | MET Norway | `api.met.no` locationforecast | ~9 days, temperatures only |
 
+Each source also yields humidity, wind speed (mph) and direction: the source's own daily figure where it publishes one (TWC dayparts, NWS/AccuWeather wind text), otherwise the 6am–8pm average of its hourly data (`fill_daily_from_hourly`). Tiles show the cross-source average; direction is the most common compass point.
+
 A source failing is recorded on its own entry (`ok: false`) and never blocks the run.
 
 ## Run / test

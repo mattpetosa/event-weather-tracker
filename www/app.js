@@ -44,6 +44,11 @@
       $(".hi", node).textContent = deg(s.hi);
       $(".lo", node).textContent = deg(s.lo);
       $(".cond", node).textContent = s.cond || "";
+      const humEl = $(".hum", node), windEl = $(".wind", node);
+      if (s.hum == null) { humEl.textContent = "—"; humEl.classList.add("na"); }
+      else humEl.textContent = s.hum + "%";
+      if (s.wind == null) { windEl.textContent = "—"; windEl.classList.add("na"); }
+      else windEl.textContent = s.wind + " mph" + (s.wdir ? " " + s.wdir : "");
 
       const popEl = $(".pop-num", node);
       if (s.pop == null) {
@@ -78,7 +83,7 @@
         const inWindow = isKey && h.h >= KEY_WINDOW.from && h.h <= KEY_WINDOW.to;
         b.className = "h" + (h.pop == null ? " na" : "") + ((h.h < 6 || h.h >= 21) ? " night" : "") + (inWindow ? " gold" : "");
         b.style.height = h.pop == null ? "2px" : Math.max(2, h.pop) + "%";
-        b.title = hourLabel(h.h) + ": " + (h.pop == null ? "no hourly data" : h.pop + "% · " + h.n + " src" + (h.temp != null ? " · " + h.temp + "°" : ""));
+        b.title = hourLabel(h.h) + ": " + (h.pop == null ? "no hourly data" : h.pop + "% · " + h.n + " src" + (h.temp != null ? " · " + h.temp + "°" : "") + (h.hum != null ? " · " + h.hum + "% hum" : "") + (h.wind != null ? " · " + h.wind + " mph" : ""));
         const nearWindow = isKey && h.h >= KEY_WINDOW.from - 1 && h.h <= KEY_WINDOW.to + 1;
         if (h.pop != null && (inWindow || (h.h % 3 === 0 && !nearWindow))) {
           const l = document.createElement("span");
@@ -107,6 +112,12 @@
         const d = src.daily && src.daily[date];
         const n = document.createElement("span"); n.className = "n";
         n.innerHTML = src.name + (src.note ? "<small>" + src.note + "</small>" : "");
+        if (src.ok && d && (d.hum != null || d.wind != null)) {
+          const vit = document.createElement("span"); vit.className = "vit";
+          vit.textContent = (d.hum != null ? d.hum + "% humidity" : "") + (d.hum != null && d.wind != null ? " · " : "") +
+            (d.wind != null ? d.wind + " mph" + (d.wdir ? " " + d.wdir : "") : "");
+          n.appendChild(vit);
+        }
         const t = document.createElement("span"); t.className = "t";
         const p = document.createElement("span"); p.className = "p";
         if (!src.ok) { li.className = "off"; t.textContent = ""; p.textContent = "unavailable"; p.className += " na"; }
