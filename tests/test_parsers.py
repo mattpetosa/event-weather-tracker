@@ -92,3 +92,40 @@ def test_summary_averages_only_available_values():
     assert d["hourly"][12] == {"h": 12, "pop": 20, "n": 2, "temp": 78}
     assert d["hourly"][0]["pop"] is None
     assert s["2026-09-07"]["pop"] is None and s["2026-09-07"]["hourly_available"] is False
+
+
+def test_ensemble_probability_is_member_share():
+    d, h = c.parse_ensemble(fx("ensemble_ecmwf.json"))
+    assert d["2026-09-06"]["members"] == 51
+    # hi/lo are the member-mean curve's extremes, so they sit inside the members' spread
+    h6 = fx("ensemble_ecmwf.json")["hourly"]
+    idx = [i for i, t in enumerate(h6["time"]) if t.startswith("2026-09-06")]
+    member_max = max(h6[k][i] for k in h6 if k.startswith("temperature") for i in idx)
+    assert d["2026-09-06"]["hi"] < member_max
+    for day in c.EVENT_DAYS:
+        assert day in d and 0 <= d[day]["pop"] <= 100
+        assert d[day]["hi"] > d[day]["lo"]
+    assert len(h["2026-09-06"]) == 24
+    assert all(0 <= v["pop"] <= 100 for v in h["2026-09-06"].values())
+    # a day's chance can never be below its wettest single hour
+    assert d["2026-09-06"]["pop"] >= max(v["pop"] for hr, v in h["2026-09-06"].items() if hr in c.DAY_WINDOW)
+
+def test_ensemble_gefs_and_partial_first_day_dropped():
+    d, h = c.parse_ensemble(fx("ensemble_gefs.json"))
+    assert d["2026-09-06"]["members"] == 31
+    first = min(h)
+    assert len(h[first]) == 24  # open-meteo pads today from midnight
+
+def test_ensemble_synthetic_counts():
+    hours = ["2026-09-06T%02d:00" % i for i in range(24)]
+    base = {"time": hours}
+    # member 1 rains at noon, member 2 rains at 3am (outside the daytime window), members 3-4 dry
+    base["precipitation_member01"] = [1.0 if i == 12 else 0 for i in range(24)]
+    base["precipitation_member02"] = [1.0 if i == 3 else 0 for i in range(24)]
+    base["precipitation_member03"] = [0.1] * 24   # a spread-out 6h block: counts every hour, and the day
+    base["precipitation_member04"] = [0.005] * 24 # trace below both bars: never counts
+    d, h = c.parse_ensemble({"hourly": base})
+    assert d["2026-09-06"]["pop"] == 50           # members 1 and 3
+    assert h["2026-09-06"][12]["pop"] == 50       # members 1 and 3
+    assert h["2026-09-06"][3]["pop"] == 50        # members 2 and 3
+    assert h["2026-09-06"][5]["pop"] == 25        # member 3 only

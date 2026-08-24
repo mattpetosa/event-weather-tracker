@@ -253,6 +253,55 @@ def parse_accuweather_hourly(page: str):
         }
     return hourly
 
+POP_THRESHOLD_MM = 0.254   # 0.01 inch — the NWS "measurable precipitation" bar, applied to the day's total
+HOURLY_THRESHOLD_MM = 0.05 # per hour. Beyond ~day 6 the ensembles are 6-hourly and Open-Meteo spreads each
+                           # block's total evenly over its hours, so 0.05 mm/h ≈ measurable rain in the block.
+DAY_WINDOW = range(6, 21)  # 6am–8pm local: the daytime span the other sources' daily figure covers
+
+
+def parse_ensemble(d):
+    """Open-Meteo ensemble response: hourly precipitation (and temperature) per
+    member. Rain chance = share of members that produce measurable rain —
+    daily over the daytime window, hourly within that hour. Temperatures are
+    the member mean."""
+    h = d["hourly"]
+    members = sorted(k for k in h if k.startswith("precipitation"))
+    temps = sorted(k for k in h if k.startswith("temperature_2m"))
+    if not members:
+        raise ValueError("no ensemble members in response")
+    by_day = defaultdict(list)  # date -> [(hour, [precip per member], [temp per member])]
+    for i, ts in enumerate(h["time"]):
+        date, hour = ts[:10], int(ts[11:13])
+        by_day[date].append((hour, [h[m][i] for m in members], [h[t][i] for t in temps]))
+    daily, hourly = {}, _hourly_dict()
+    n = len(members)
+    for date, rows in by_day.items():
+        day_totals = [0.0] * n
+        t_hi, t_lo = [], []
+        valid_hours = 0
+        for hour, precs, tmps in rows:
+            if any(p is None for p in precs):
+                continue
+            valid_hours += 1
+            wet = sum(1 for p in precs if p >= HOURLY_THRESHOLD_MM)
+            tv = [t for t in tmps if t is not None]
+            mean_t = sum(tv) / len(tv) if tv else None  # member mean, not the extreme member
+            hourly[date][hour] = {"pop": round(100 * wet / n), "temp": _int(mean_t)}
+            if hour in DAY_WINDOW:
+                for k, p in enumerate(precs):
+                    day_totals[k] += p
+            if mean_t is not None:
+                t_hi.append(mean_t); t_lo.append(mean_t)
+        if valid_hours < 20:  # the run's final day is usually cut short a few hours
+            continue
+        wet_days = sum(1 for tot in day_totals if tot >= POP_THRESHOLD_MM)
+        daily[date] = {"pop": round(100 * wet_days / n),
+                       "hi": _int(max(t_hi)) if t_hi else None,
+                       "lo": _int(min(t_lo)) if t_lo else None,
+                       "cond": None, "members": n}
+    return daily, hourly
+
+
 # ----------------------------------------------------------------------------
 # fetchers — each returns (daily, hourly)
 # ----------------------------------------------------------------------------
@@ -277,6 +326,16 @@ def fetch_openmeteo(model, lon=None):
             "forecast_days": 16, "timezone": "America/New_York",
             "temperature_unit": "fahrenheit", "models": model})
         return parse_openmeteo(http_json("https://api.open-meteo.com/v1/forecast?" + q))
+    return _f
+
+
+def fetch_ensemble(model, lon=None):
+    def _f():
+        q = urllib.parse.urlencode({
+            "latitude": LOCATION["lat"], "longitude": lon or LOCATION["lon"],
+            "hourly": "precipitation,temperature_2m", "forecast_days": 16,
+            "timezone": "America/New_York", "temperature_unit": "fahrenheit", "models": model})
+        return parse_ensemble(http_json("https://ensemble-api.open-meteo.com/v1/ensemble?" + q))
     return _f
 
 
@@ -323,6 +382,12 @@ SOURCES = [
     {"id": "nws", "name": "National Weather Service", "short": "NWS / NOAA",
      "url": "https://forecast.weather.gov/MapClick.php?lat=40.347&lon=-74.064", "fetch": fetch_nws,
      "note": "7-day forecast — appears once the day is within a week"},
+    {"id": "ecmwf_ens", "name": "ECMWF ensemble (51 runs)", "short": "ECMWF ENS",
+     "url": "https://open-meteo.com/en/docs/ensemble-api", "fetch": fetch_ensemble("ecmwf_ifs025", lon=-74.15),
+     "note": "Share of 51 model runs that produce measurable daytime rain"},
+    {"id": "gefs", "name": "GEFS ensemble (31 runs)", "short": "GEFS",
+     "url": "https://open-meteo.com/en/docs/ensemble-api", "fetch": fetch_ensemble("gfs_seamless"),
+     "note": "Share of 31 NOAA model runs that produce measurable daytime rain"},
     {"id": "ecmwf", "name": "ECMWF (European model)", "short": "ECMWF",
      "url": "https://open-meteo.com/", "fetch": fetch_openmeteo("ecmwf_ifs025", lon=-74.15),
      "note": "via Open-Meteo, nearest land grid cell"},
