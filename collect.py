@@ -30,7 +30,7 @@ HISTORY_DIR = os.path.join(DATA_DIR, "history")
 TZ = ZoneInfo("America/New_York")
 
 LOCATION = {"name": "Red Bank, NJ", "lat": 40.347, "lon": -74.064}
-EVENT_DAYS = ["2026-09-04", "2026-09-05", "2026-09-06", "2026-09-07"]
+EVENT_DAYS = ["2026-09-05", "2026-09-06", "2026-09-07"]
 KEY_DAY = "2026-09-06"
 
 UA_CONTACT = "weather.mhpwebserver.com (16355926+mattpetosa@users.noreply.github.com)"

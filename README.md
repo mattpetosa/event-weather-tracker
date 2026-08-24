@@ -1,4 +1,4 @@
-# weather.mhpwebserver.com — Red Bank, NJ · Sept 4–7, 2026
+# weather.mhpwebserver.com — Red Bank, NJ · Sept 5–7, 2026
 
 Consensus rain outlook for one weekend, built for phones. Every hour `collect.py`
 pulls the Red Bank forecast from ten sources, averages the daily chance of rain
