@@ -56,7 +56,7 @@
       if (s.pop != null) {
         band.style.left = (s.pop_min || 0) + "%";
         band.style.width = Math.max(0, (s.pop_max || 0) - (s.pop_min || 0)) + "%";
-        tick.style.left = "calc(" + s.pop + "% - 1px)";
+        tick.style.left = s.pop + "%";
         requestAnimationFrame(() => { fill.style.width = s.pop + "%"; });
       } else {
         tick.style.display = "none";

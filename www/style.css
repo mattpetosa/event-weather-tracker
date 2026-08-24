@@ -86,12 +86,17 @@ h1 span { font-weight: 400; color: var(--ink-2); }
 .pop-label { color: var(--ink-2); font-size: 14px; }
 
 .bar {
-  position: relative; height: 14px; margin: 10px 0 8px;
-  background: #EEF2F6; border-radius: 999px; overflow: hidden;
+  position: relative; height: 14px; margin: 14px 0 10px;
+  background: #EEF2F6; border-radius: 999px;
 }
 .bar .band { position: absolute; top: 0; bottom: 0; background: var(--band); border-radius: 999px; }
 .bar .fill { position: absolute; top: 0; bottom: 0; left: 0; background: var(--rain); border-radius: 999px; transition: width .6s cubic-bezier(.2,.8,.2,1); }
-.bar .tick { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--ink); opacity: .55; }
+.bar .tick {
+  position: absolute; top: 50%; width: 22px; height: 22px; margin: -11px 0 0 -11px;
+  background: #fff; border: 4px solid var(--rain); border-radius: 50%;
+  box-shadow: 0 1px 4px rgba(20,33,44,.25); z-index: 1;
+}
+.day.key .bar .tick { border-color: var(--rain); box-shadow: 0 0 0 2px var(--gold), 0 1px 4px rgba(20,33,44,.25); }
 .meta { margin: 0; font-size: 13px; color: var(--ink-3); }
 .meta b { color: var(--ink-2); font-weight: 500; }
 
