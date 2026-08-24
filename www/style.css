@@ -162,3 +162,16 @@ h1 span { font-weight: 400; color: var(--ink-2); font-size: .72em; }
 @media (min-width: 480px) {
   .day { padding: 20px 22px 16px; }
 }
+
+/* ceremony verdict (key day only) */
+.verdict { margin-top: 12px; padding: 10px 12px; border-radius: 12px; background: var(--gold-soft); }
+.verdict-head { margin: 0 0 6px; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+.verdict-label { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; font-weight: 600; color: #7A5F0E; }
+.verdict-text { font-family: var(--display); font-weight: 600; font-size: 16px; color: var(--ink); }
+.factors { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px 14px; }
+.factors li { display: flex; align-items: center; gap: 5px; font-size: 13px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.factors li::before { content: ""; width: 9px; height: 9px; border-radius: 50%; background: #3B9C5A; flex: none; }
+.factors li.watch::before { background: #E0A100; }
+.factors li.concern::before { background: #C44; }
+.factors li b { color: var(--ink); font-weight: 600; }
+.verdict .basis { margin: 6px 0 0; font-size: 11px; color: var(--ink-3); }

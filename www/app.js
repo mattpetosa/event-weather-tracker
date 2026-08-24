@@ -3,6 +3,15 @@
   const $ = (s, r) => (r || document).querySelector(s);
   const DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
   const KEY_WINDOW = { from: 16, to: 18, label: "Ceremony & cocktail hour, 4:30–6:30pm" };
+  // Thresholds for a seated, dressed-up crowd in late-afternoon sun: [good max, watch max]
+  const RULES = {
+    rain: { good: 20, watch: 35 },
+    wind: { good: 10, watch: 15 },
+    hum:  { good: 65, watch: 70 },
+  };
+  function grade(v, r) { return v == null ? null : v <= r.good ? "good" : v <= r.watch ? "watch" : "concern"; }
+  function gradeTemp(t) { return t == null ? null : (t >= 68 && t <= 78) ? "good" : (t >= 62 && t <= 82) ? "watch" : "concern"; }
+  function avgOf(rows, k) { const v = rows.map(r => r[k]).filter(x => x != null); return v.length ? Math.round(v.reduce((a, b) => a + b, 0) / v.length) : null; }
   const MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
   function parseDay(iso) {
@@ -74,6 +83,49 @@
           " · tap for hourly";
       } else {
         meta.textContent = "Forecasts reach this far out only from some sources — check back later.";
+      }
+
+      // ceremony verdict
+      if (isKey) {
+        const win = s.hourly.filter(h => h.h >= KEY_WINDOW.from && h.h <= KEY_WINDOW.to && h.pop != null);
+        const lead = s.hourly.filter(h => h.h >= 14 && h.h <= KEY_WINDOW.to && h.pop != null);
+        const hourlyBasis = win.length > 0;
+        const f = hourlyBasis
+          ? { rain: Math.max(...lead.map(h => h.pop)), wind: avgOf(win, "wind") ?? s.wind, hum: avgOf(win, "hum") ?? s.hum, temp: avgOf(win, "temp") ?? s.hi }
+          : { rain: s.pop, wind: s.wind, hum: s.hum, temp: s.hi };
+        const g = { rain: grade(f.rain, RULES.rain), wind: grade(f.wind, RULES.wind), hum: grade(f.hum, RULES.hum), temp: gradeTemp(f.temp) };
+        const names = { rain: "rain", wind: "wind", hum: "humidity", temp: "temperature" };
+        const concerns = Object.keys(g).filter(k => g[k] === "concern").map(k => names[k]);
+        const watches = Object.keys(g).filter(k => g[k] === "watch").map(k => names[k]);
+        const known = Object.values(g).filter(Boolean).length;
+        let text;
+        if (!known) text = "No forecast for the ceremony window yet";
+        else if (concerns.length) text = "Concern: " + concerns.join(", ");
+        else if (watches.length) text = "Good — keep an eye on " + watches.join(" and ");
+        else text = "Ideal so far";
+        const v = $(".verdict", node);
+        v.hidden = false;
+        $(".verdict-label", v).textContent = "Ceremony · 4:30–6:30pm";
+        $(".verdict-text", v).textContent = text;
+        const ul = $(".factors", v);
+        [["rain", f.rain == null ? null : f.rain + "%", "rain"],
+         ["wind", f.wind == null ? null : f.wind + " mph" + (s.wdir ? " " + s.wdir : ""), "wind"],
+         ["hum", f.hum == null ? null : f.hum + "%", "humidity"],
+         ["temp", f.temp == null ? null : f.temp + "°", "temp"]].forEach(([k, val, label]) => {
+          if (val == null) return;
+          const li = document.createElement("li");
+          li.className = g[k];
+          li.innerHTML = label + " <b>" + val + "</b>";
+          ul.appendChild(li);
+        });
+        if (known) {
+          const basis = document.createElement("p");
+          basis.className = "basis";
+          basis.textContent = hourlyBasis
+            ? "Rain is the peak chance from 2pm through the ceremony; wind, humidity and temperature are the 4–6pm average."
+            : "Based on the day's averages until hourly forecasts reach this date.";
+          v.appendChild(basis);
+        }
       }
 
       // hourly
