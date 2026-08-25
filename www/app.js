@@ -50,6 +50,7 @@
     days.innerHTML = "";
     const tpl = $("#day-tpl");
     const okCount = data.sources.filter(s => s.ok).length;
+    let deepLinked = null;
 
     data.days.forEach(date => {
       const s = data.summary[date];
@@ -216,14 +217,21 @@
         node.setAttribute("aria-expanded", String(open));
         if (open && scroll !== false) requestAnimationFrame(() => node.scrollIntoView({ block: "nearest", behavior: "smooth" }));
       };
+      // The element id is "d2026-09-06" while the shareable hash is
+      // "#2026-09-06", so the browser's own anchor jump never fires — the
+      // day opened where it was and stayed off-screen on a phone. Noted
+      // here and scrolled to once, after every day has been appended.
       node.id = "d" + date;
-      if (location.hash === "#" + date) toggle(false);
+      if (location.hash === "#" + date) { toggle(false); deepLinked = node; }
       node.addEventListener("click", e => { if (!detail.contains(e.target)) toggle(); });
       node.addEventListener("keydown", e => {
         if ((e.key === "Enter" || e.key === " ") && !detail.contains(e.target)) { e.preventDefault(); toggle(); }
       });
       days.appendChild(node);
     });
+    if (deepLinked) {
+      requestAnimationFrame(() => deepLinked.scrollIntoView({ block: "start" }));
+    }
 
     // sources list
     const ul = $("#sources");

@@ -218,3 +218,21 @@ def test_accuweather_card_does_not_inherit_the_next_day_s_wind():
     assert d["2026-08-24"]["wind"] is None
     assert d["2026-08-24"]["wdir"] is None
     assert d["2026-08-25"]["wind"] == 8 and d["2026-08-25"]["wdir"] == "W"
+
+
+def test_openmeteo_survives_a_short_weather_code_array():
+    """GEM stops returning weather_code past day 10 while still returning
+    temperatures. Indexing a padded [None] * 99 covered a missing array but
+    not a short one, which raised IndexError and failed the whole source."""
+    d = fx("openmeteo_ecmwf.json")
+    n = len(d["daily"]["time"])
+    assert n > 2
+    d["daily"]["weather_code"] = d["daily"]["weather_code"][:2]
+    parsed = c.parse_openmeteo(d)[0]
+    dates = d["daily"]["time"]
+    assert len(parsed) == n
+    assert parsed[dates[-1]]["cond"] is None
+    assert parsed[dates[2]]["cond"] is None
+    assert parsed[dates[2]]["hi"] is not None, "the rest of the day survives"
+    del d["daily"]["weather_code"]
+    assert all(v["cond"] is None for v in c.parse_openmeteo(d)[0].values())

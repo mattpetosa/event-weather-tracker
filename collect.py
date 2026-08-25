@@ -181,13 +181,20 @@ def parse_twc_hourly(d):
 def parse_openmeteo(d):
     daily, hourly = {}, _hourly_dict()
     dl = d.get("daily", {})
+    pops = dl.get("precipitation_probability_max") or []
+    # Length-checked like pops, not padded: `[None] * 99` stood in for a
+    # missing weather_code array and happened to work only while no source
+    # returned more than 99 days — and it did nothing at all for the other
+    # case, a weather_code array present but shorter than time (GEM returns
+    # exactly that past day 10), which raised IndexError and failed the
+    # whole source.
+    codes = dl.get("weather_code") or []
     for i, date in enumerate(dl.get("time", [])):
-        pops = dl.get("precipitation_probability_max") or []
         daily[date] = {
             "pop": _int(pops[i]) if i < len(pops) else None,
             "hi": _int(dl["temperature_2m_max"][i]),
             "lo": _int(dl["temperature_2m_min"][i]),
-            "cond": WMO_CODES.get(_int((dl.get("weather_code") or [None] * 99)[i])),
+            "cond": WMO_CODES.get(_int(codes[i])) if i < len(codes) else None,
         }
     hl = d.get("hourly", {})
     pops = hl.get("precipitation_probability") or []
@@ -473,9 +480,15 @@ def fetch_accuweather():
             if rh.status_code == 200 and "Hourly Weather" in rh.text:
                 for date, hours in parse_accuweather_hourly(rh.text).items():
                     hourly[date].update(hours)
-            time.sleep(1.5)
         except Exception:  # noqa: BLE001 — hourly is best-effort
             pass
+        finally:
+            # In a finally, not at the end of the try: a request that raised
+            # skipped the pause entirely, so the four hourly pages went out
+            # back to back precisely when Akamai was already unhappy with us
+            # — the moment the courtesy gap matters most.
+            if day < 4:
+                time.sleep(1.5)
     return daily, hourly
 
 
@@ -645,14 +658,26 @@ def collect(sources=SOURCES, days=EVENT_DAYS, verbose=True):
     }
 
 
+# How many snapshots of history ride along in latest.json. Nothing in www/
+# reads `trend` today; it is kept because it is the only record of how the
+# forecast moved, and dropping it would quietly discard that.
+TREND_POINTS = 400
+
+
 def write(result):
     os.makedirs(HISTORY_DIR, exist_ok=True)
     stamp = datetime.now(TZ).strftime("%Y%m%d-%H%M")
     with open(os.path.join(HISTORY_DIR, f"{stamp}.json"), "w") as f:
         json.dump(result, f, separators=(",", ":"))
-    # trend: one point per snapshot, tiny enough to ship to the browser
+    # trend: one point per snapshot, tiny enough to ship to the browser.
+    # Only the newest TREND_POINTS files are opened. This used to read and
+    # parse every file in the history directory on every run and then throw
+    # all but the last 400 away — one snapshot an hour means the discarded
+    # work grows without limit while the answer never changes. History file
+    # names are the sortable stamp `YYYYMMDD-HHMM`, so the tail of the
+    # sorted listing is exactly the newest ones.
     trend = []
-    for name in sorted(os.listdir(HISTORY_DIR)):
+    for name in sorted(os.listdir(HISTORY_DIR))[-TREND_POINTS:]:
         try:
             with open(os.path.join(HISTORY_DIR, name)) as f:
                 snap = json.load(f)
@@ -660,7 +685,7 @@ def write(result):
                           "pop": {d: snap["summary"][d]["pop"] for d in snap["days"]}})
         except Exception:  # noqa: BLE001
             continue
-    result["trend"] = trend[-400:]
+    result["trend"] = trend
     tmp = os.path.join(DATA_DIR, "latest.json.tmp")
     with open(tmp, "w") as f:
         json.dump(result, f, separators=(",", ":"))
