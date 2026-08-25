@@ -35,6 +35,16 @@
   function deg(v) { return v == null ? "—" : v + "°"; }
   function fmtDay(iso) { const d = parseDay(iso); return MON[d.getMonth()] + " " + d.getDate(); }
 
+  // The far end of a source's "YYYY-MM-DD → YYYY-MM-DD" coverage range, or
+  // "" for anything that isn't one. collect.py writes null when a source
+  // came back with no days at all, and this is not the place to find out
+  // the hard way that it wrote something else.
+  function coverageEnd(coverage) {
+    if (typeof coverage !== "string") return "";
+    const end = coverage.split("→")[1];
+    return end ? end.trim() : "";
+  }
+
   function render(data) {
     const days = $("#days");
     days.innerHTML = "";
@@ -221,9 +231,23 @@
     data.sources.forEach(src => {
       const li = document.createElement("li");
       if (!src.ok) li.className = "off";
-      li.innerHTML = '<a href="' + src.url + '" target="_blank" rel="noopener">' + src.name + "</a>" +
-        (src.ok ? (src.coverage ? "<small>through " + fmtDay(src.coverage.split("→")[1].trim()) + "</small>" : "")
-                : "<small>unavailable on last check</small>");
+      // Built as nodes, not markup: every other field on this page goes
+      // through esc(), and this one line was the exception — src.url and
+      // src.name interpolated raw into innerHTML.
+      const a = document.createElement("a");
+      a.href = src.url || "#";
+      a.target = "_blank";
+      a.rel = "noopener";
+      a.textContent = src.name;
+      li.appendChild(a);
+      const small = document.createElement("small");
+      // coverage may be absent or malformed — a source can report ok with
+      // nothing in it. Read the end of the range defensively rather than
+      // letting one blank source throw out of render() and blank the page.
+      const through = coverageEnd(src.coverage);
+      if (!src.ok) small.textContent = "unavailable on last check";
+      else if (through) small.textContent = "through " + fmtDay(through);
+      if (small.textContent) li.appendChild(small);
       ul.appendChild(li);
     });
 

@@ -191,3 +191,13 @@ def test_sun_times_red_bank_sept_6():
     assert st["sunset"] in ("19:19", "19:20", "19:21")
     h, m = map(int, st["golden_start"].split(":"))
     assert 18 * 60 + 20 <= h * 60 + m <= 18 * 60 + 45   # ~40-55 min before sunset in September
+
+
+def test_coverage_is_null_when_a_source_returns_no_days():
+    """[] is truthy in JavaScript: an empty coverage list made the page call
+    .split() on it and throw out of render(), blanking the whole forecast
+    because one source came back empty. Must be None, like the failure
+    branch already writes."""
+    assert c.coverage_range({}) is None
+    assert c.coverage_range({"2026-09-05": {}, "2026-09-07": {}}) == \
+        "2026-09-05 → 2026-09-07"

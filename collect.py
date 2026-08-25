@@ -112,6 +112,18 @@ def _local_date_hour(iso: str):
     return dt.strftime("%Y-%m-%d"), dt.hour
 
 
+def coverage_range(daily):
+    """"first → last" for what a source returned, or None if it returned nothing.
+
+    None, not []. The old expression was `sorted(daily)[-1:] and f"..."`,
+    which yields the empty list for an empty forecast — and [] is *truthy*
+    in JavaScript, so the page called .split() on it and threw out of
+    render(), blanking the entire forecast because one source came back
+    with no days. The failure path already wrote None; this agrees with it.
+    """
+    return f"{min(daily)} → {max(daily)}" if daily else None
+
+
 def _hourly_dict():
     return defaultdict(dict)
 
@@ -603,7 +615,7 @@ def collect(sources=SOURCES, days=EVENT_DAYS, verbose=True):
                 "daily": {d: daily[d] for d in days if d in daily},
                 "hourly": {d: {str(h): v for h, v in sorted(hourly[d].items())}
                            for d in days if d in hourly and hourly[d]},
-                "coverage": sorted(daily.keys())[-1:] and f"{min(daily)} → {max(daily)}",
+                "coverage": coverage_range(daily),
             })
         except Exception as e:  # noqa: BLE001 — one bad source must not kill the run
             entry.update({"ok": False, "error": f"{type(e).__name__}: {e}"[:200],
