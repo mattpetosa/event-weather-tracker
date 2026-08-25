@@ -201,3 +201,20 @@ def test_coverage_is_null_when_a_source_returns_no_days():
     assert c.coverage_range({}) is None
     assert c.coverage_range({"2026-09-05": {}, "2026-09-07": {}}) == \
         "2026-09-05 → 2026-09-07"
+
+
+def test_accuweather_card_does_not_inherit_the_next_day_s_wind():
+    """The phrase and wind live in the panel after the card, so the search
+    has to run past the card's </a> — but a fixed 2500-char window ran into
+    the following day (real panels are 570–1120 chars apart). A day whose
+    panel omitted the wind quietly reported tomorrow's."""
+    page = fx("accuweather_daily.html")
+    cards = list(c._ACCU_CARD.finditer(page))
+    panel = page[cards[0].end():cards[1].start()]
+    stripped = (page[:cards[0].end()]
+                + c._ACCU_WIND.sub("", panel, count=1)
+                + page[cards[1].start():])
+    d = c.parse_accuweather_daily(stripped)
+    assert d["2026-08-24"]["wind"] is None
+    assert d["2026-08-24"]["wdir"] is None
+    assert d["2026-08-25"]["wind"] == 8 and d["2026-08-25"]["wdir"] == "W"

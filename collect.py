@@ -294,7 +294,8 @@ def parse_accuweather_daily(page: str, year_hint: int | None = None):
     daily = {}
     year = year_hint or datetime.now(TZ).year
     prev_month = None
-    for m in _ACCU_CARD.finditer(page):
+    cards = list(_ACCU_CARD.finditer(page))
+    for i, m in enumerate(cards):
         card = m.group(1)
         dm = _ACCU_DATE.search(card)
         if not dm:
@@ -305,7 +306,14 @@ def parse_accuweather_daily(page: str, year_hint: int | None = None):
         prev_month = month
         date = f"{year:04d}-{month:02d}-{day:02d}"
         hi, lo, pop = _ACCU_HI.search(card), _ACCU_LO.search(card), _ACCU_POP.search(card)
-        tail = page[m.end():m.end() + 2500]
+        # The phrase and wind sit in the expandable panel that follows the
+        # card, so the search has to run past the card's own </a>. It must
+        # stop at the NEXT card, though: a fixed 2500-char window ran
+        # straight into the following day, so a card whose panel omitted the
+        # wind (or was shorter than the window) silently inherited tomorrow's
+        # figure and reported it as today's.
+        stop = cards[i + 1].start() if i + 1 < len(cards) else len(page)
+        tail = page[m.end():min(m.end() + 2500, stop)]
         ph = _ACCU_PHRASE.search(tail)
         wm = _ACCU_WIND.search(tail)
         wind, wdir = _wind_from_text(html.unescape(wm.group(1)) if wm else None)
