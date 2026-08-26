@@ -199,6 +199,19 @@ def parse_openmeteo(d):
     hl = d.get("hourly", {})
     pops = hl.get("precipitation_probability") or []
     hums = hl.get("relative_humidity_2m") or []
+    # Daily pop: precipitation_probability_max is the 24-hour max, overnight
+    # included, while TWC/AccuWeather/NWS and the ensembles publish a
+    # *daytime* chance. Re-derive it as the max over DAY_WINDOW from the
+    # hourly array so the rows are comparable (fall back to the 24 h figure
+    # if the day has no hourly data).
+    day_max = defaultdict(lambda: None)
+    for i, ts in enumerate(hl.get("time", [])):
+        if i < len(pops) and pops[i] is not None and int(ts[11:13]) in DAY_WINDOW:
+            cur = day_max[ts[:10]]
+            day_max[ts[:10]] = pops[i] if cur is None else max(cur, pops[i])
+    for date, v in daily.items():
+        if day_max.get(date) is not None:
+            v["pop"] = _int(day_max[date])
     winds = hl.get("wind_speed_10m") or []
     dirs = hl.get("wind_direction_10m") or []
     for i, ts in enumerate(hl.get("time", [])):
@@ -513,10 +526,10 @@ SOURCES = [
      "note": "via Open-Meteo, nearest land grid cell"},
     {"id": "gfs", "name": "GFS (NOAA global model)", "short": "GFS",
      "url": "https://open-meteo.com/", "fetch": fetch_openmeteo("gfs_seamless"), "note": "via Open-Meteo"},
+    # No "best_match" blend row: for this location it resolves to GFS and was
+    # a byte-identical duplicate, double-weighting GFS in every average.
     {"id": "gem", "name": "GEM (Environment Canada)", "short": "GEM",
      "url": "https://open-meteo.com/", "fetch": fetch_openmeteo("gem_seamless"), "note": "via Open-Meteo"},
-    {"id": "openmeteo", "name": "Open-Meteo blend", "short": "Open-Meteo",
-     "url": "https://open-meteo.com/", "fetch": fetch_openmeteo("best_match"), "note": "Best-match model blend"},
     {"id": "metno", "name": "MET Norway (yr.no)", "short": "yr.no",
      "url": "https://www.yr.no/", "fetch": fetch_metno, "note": "Temperatures only — publishes no rain probability"},
 ]

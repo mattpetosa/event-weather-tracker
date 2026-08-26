@@ -236,3 +236,26 @@ def test_openmeteo_survives_a_short_weather_code_array():
     assert parsed[dates[2]]["hi"] is not None, "the rest of the day survives"
     del d["daily"]["weather_code"]
     assert all(v["cond"] is None for v in c.parse_openmeteo(d)[0].values())
+
+
+def test_openmeteo_daily_pop_is_daytime_window_not_24h_max():
+    """Open-Meteo's precipitation_probability_max covers the whole 24 h,
+    including overnight; the other sources publish a *daytime* chance. The
+    daily figure must be the max over DAY_WINDOW so the rows are comparable."""
+    d = fx("openmeteo_ecmwf.json")
+    date = "2026-09-06"
+    idx = [i for i, t in enumerate(d["hourly"]["time"]) if t.startswith(date)]
+    for i in idx:
+        d["hourly"]["precipitation_probability"][i] = 10
+    night = [i for i in idx if int(d["hourly"]["time"][i][11:13]) not in c.DAY_WINDOW]
+    d["hourly"]["precipitation_probability"][night[0]] = 90
+    d["daily"]["precipitation_probability_max"][d["daily"]["time"].index(date)] = 90
+    day_i = [i for i in idx if int(d["hourly"]["time"][i][11:13]) in c.DAY_WINDOW][0]
+    d["hourly"]["precipitation_probability"][day_i] = 35
+    assert c.parse_openmeteo(d)[0][date]["pop"] == 35
+
+
+def test_best_match_blend_is_not_a_source():
+    """best_match resolves to GFS for this location, so listing it doubled
+    GFS's weight in every average."""
+    assert "openmeteo" not in {s["id"] for s in c.SOURCES}
