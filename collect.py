@@ -21,7 +21,7 @@ import time
 import urllib.parse
 import urllib.request
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, date as date_cls
 from zoneinfo import ZoneInfo
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -582,14 +582,54 @@ def sun_times(date, lat=LOCATION["lat"], lon=LOCATION["lon"]):
 # ----------------------------------------------------------------------------
 
 def _avg(vals):
+    """Plain mean over the non-None values, with the count."""
     vals = [v for v in vals if v is not None]
     return (round(sum(vals) / len(vals)), len(vals)) if vals else (None, 0)
 
 
-def summarise(sources, days=EVENT_DAYS):
+def _wavg(pairs):
+    """Weighted mean over (value, weight) pairs, skipping None values.
+    Returns (mean, n_sources) — n counts sources, not weight."""
+    pairs = [(v, w) for v, w in pairs if v is not None]
+    if not pairs:
+        return None, 0
+    tot = sum(w for _, w in pairs)
+    return round(sum(v * w for v, w in pairs) / tot), len(pairs)
+
+
+def source_weight(source_id, lead_days):
+    """How much a source counts in the headline average, by how far out the
+    day is. Sources are not equally skilful: at 1–2 weeks the ensembles
+    (ECMWF ENS especially) are the best estimate on the page, a single
+    deterministic GFS/GEM run is close to noise, and AccuWeather's 15-day is
+    weak past about a week. NWS is human-adjusted and its trust ramps up as
+    the day approaches. Unknown ids count as a plain 1.0."""
+    if lead_days is None:
+        lead_days = 7
+    if source_id == "ecmwf_ens":
+        return 2.0
+    if source_id == "gefs":
+        return 1.5
+    if source_id == "nws":
+        return 2.0 if lead_days <= 3 else 1.5
+    if source_id == "twc":
+        return 1.5
+    if source_id == "accuweather":
+        return 1.0 if lead_days <= 7 else 0.5
+    if source_id in ("ecmwf", "gfs"):
+        return 1.0
+    if source_id == "gem":
+        return 0.75
+    return 1.0
+
+
+def summarise(sources, days=EVENT_DAYS, today=None):
+    today_d = date_cls.fromisoformat(today) if today else datetime.now(TZ).date()
     summary = {}
     for date in days:
+        lead = (date_cls.fromisoformat(date) - today_d).days
         pops, his, los, conds, hums, winds, wdirs = [], [], [], [], [], [], []
+        weights = {}
         per_hour = defaultdict(list)
         per_hour_temp = defaultdict(list)
         per_hour_hum = defaultdict(list)
@@ -597,35 +637,39 @@ def summarise(sources, days=EVENT_DAYS):
         for s in sources:
             if not s.get("ok"):
                 continue
+            w = source_weight(s.get("id"), lead)
             d = s["daily"].get(date)
             if d:
-                pops.append(d["pop"]); his.append(d["hi"]); los.append(d["lo"])
+                weights[s.get("id") or f"source{len(weights)}"] = w
+                pops.append((d["pop"], w)); his.append((d["hi"], w)); los.append((d["lo"], w))
                 if d.get("cond"):
                     conds.append(d["cond"])
-                hums.append(d.get("hum")); winds.append(d.get("wind")); wdirs.append(d.get("wdir"))
+                hums.append((d.get("hum"), w)); winds.append((d.get("wind"), w)); wdirs.append(d.get("wdir"))
             for h, v in (s["hourly"].get(date) or {}).items():
-                per_hour[int(h)].append(v.get("pop"))
-                per_hour_temp[int(h)].append(v.get("temp"))
-                per_hour_hum[int(h)].append(v.get("hum"))
-                per_hour_wind[int(h)].append(v.get("wind"))
-        pop, pop_n = _avg(pops)
-        hi, _ = _avg(his)
-        lo, _ = _avg(los)
+                per_hour[int(h)].append((v.get("pop"), w))
+                per_hour_temp[int(h)].append((v.get("temp"), w))
+                per_hour_hum[int(h)].append((v.get("hum"), w))
+                per_hour_wind[int(h)].append((v.get("wind"), w))
+        pop, pop_n = _wavg(pops)
+        pop_plain, _ = _avg([v for v, _ in pops])
+        hi, _ = _wavg(his)
+        lo, _ = _wavg(los)
         hourly = []
         for h in range(24):
-            p, n = _avg(per_hour.get(h, []))
-            t, _ = _avg(per_hour_temp.get(h, []))
-            hu, _ = _avg(per_hour_hum.get(h, []))
-            wi, _ = _avg(per_hour_wind.get(h, []))
+            p, n = _wavg(per_hour.get(h, []))
+            t, _ = _wavg(per_hour_temp.get(h, []))
+            hu, _ = _wavg(per_hour_hum.get(h, []))
+            wi, _ = _wavg(per_hour_wind.get(h, []))
             hourly.append({"h": h, "pop": p, "n": n, "temp": t, "hum": hu, "wind": wi})
-        valid = [v for v in pops if v is not None]
+        valid = [v for v, _ in pops if v is not None]
         summary[date] = {
-            "pop": pop, "pop_n": pop_n,
+            "pop": pop, "pop_n": pop_n, "pop_plain": pop_plain,
             "pop_min": min(valid) if valid else None,
             "pop_max": max(valid) if valid else None,
+            "lead_days": lead, "weights": weights,
             "hi": hi, "lo": lo,
-            "hum": _avg(hums)[0], "hum_n": _avg(hums)[1],
-            "wind": _avg(winds)[0], "wind_n": _avg(winds)[1], "wdir": _mode(wdirs),
+            "hum": _wavg(hums)[0], "hum_n": _wavg(hums)[1],
+            "wind": _wavg(winds)[0], "wind_n": _wavg(winds)[1], "wdir": _mode(wdirs),
             # first source in priority order with a human-written phrase; the
             # four Open-Meteo model rows would otherwise outvote weather.com/AccuWeather/NWS
             "cond": conds[0] if conds else None,

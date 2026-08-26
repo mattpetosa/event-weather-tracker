@@ -259,3 +259,29 @@ def test_best_match_blend_is_not_a_source():
     """best_match resolves to GFS for this location, so listing it doubled
     GFS's weight in every average."""
     assert "openmeteo" not in {s["id"] for s in c.SOURCES}
+
+
+def test_source_weight_by_lead_time():
+    # ECMWF ensemble is the most skilful thing on the page at 1–2 weeks out
+    assert c.source_weight("ecmwf_ens", 11) > c.source_weight("gfs", 11)
+    # AccuWeather's 15-day is weak past a week; fine inside it
+    assert c.source_weight("accuweather", 11) < c.source_weight("accuweather", 3)
+    # NWS earns more trust as the day approaches
+    assert c.source_weight("nws", 2) > c.source_weight("nws", 6)
+    # unknown / test sources count as a plain 1.0
+    assert c.source_weight(None, 5) == 1.0 and c.source_weight("bogus", 5) == 1.0
+
+
+def test_summary_headline_is_weighted_and_plain_average_kept():
+    srcs = [
+        {"id": "ecmwf_ens", "ok": True, "daily": {"2026-09-06": {"pop": 40, "hi": 80, "lo": 60}},
+         "hourly": {"2026-09-06": {"12": {"pop": 40, "temp": 80}}}},
+        {"id": "accuweather", "ok": True, "daily": {"2026-09-06": {"pop": 0, "hi": 80, "lo": 60}},
+         "hourly": {"2026-09-06": {"12": {"pop": 0, "temp": 80}}}},
+    ]
+    s = c.summarise(srcs, ["2026-09-06"], today="2026-08-26")["2026-09-06"]
+    assert s["pop_plain"] == 20
+    assert s["pop"] > 20, "headline leans toward the ensemble"
+    assert s["hourly"][12]["pop"] > 20
+    assert s["pop_n"] == 2 and s["pop_min"] == 0 and s["pop_max"] == 40
+    assert s["weights"]["ecmwf_ens"] > s["weights"]["accuweather"]

@@ -94,7 +94,9 @@
       }
       const meta = $(".meta", node);
       if (s.pop != null) {
-        meta.innerHTML = "Average of <b>" + s.pop_n + " source" + (s.pop_n === 1 ? "" : "s") + "</b>" +
+        const weighted = s.pop_plain != null && s.weights && Object.keys(s.weights).length > 1;
+        meta.innerHTML = (weighted ? "Skill-weighted across <b>" : "Average of <b>") + s.pop_n + " source" + (s.pop_n === 1 ? "" : "s") + "</b>" +
+          (weighted && s.pop_plain !== s.pop ? " (plain average <b>" + s.pop_plain + "%</b>)" : "") +
           (s.pop_n > 1 ? " · they range from <b>" + s.pop_min + "%</b> to <b>" + s.pop_max + "%</b>" : "") +
           " · tap for hourly";
       } else {
@@ -189,7 +191,9 @@
         const li = document.createElement("li");
         const d = src.daily && src.daily[date];
         const n = document.createElement("span"); n.className = "n";
-        n.innerHTML = src.name + (src.note ? "<small>" + src.note + "</small>" : "");
+        const w = s.weights && s.weights[src.id];
+        n.innerHTML = src.name + (w != null && w !== 1 ? " <span class=\"w\" title=\"weight in the headline average\">×" + w + "</span>" : "") +
+          (src.note ? "<small>" + src.note + "</small>" : "");
         if (src.ok && d && (d.hum != null || d.wind != null)) {
           const vit = document.createElement("span"); vit.className = "vit";
           vit.textContent = (d.hum != null ? d.hum + "% humidity" : "") + (d.hum != null && d.wind != null ? " · " : "") +

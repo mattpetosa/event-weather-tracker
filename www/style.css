@@ -138,6 +138,7 @@ h1 span { font-weight: 400; color: var(--ink-2); font-size: .72em; }
 }
 .per-source li:last-child { border-bottom: 0; }
 .per-source .n { font-weight: 500; }
+.per-source .n .w { font-size: 11px; color: var(--ink-3); font-weight: 500; margin-left: 2px; }
 .per-source .n small { display: block; font-weight: 400; color: var(--ink-3); font-size: 12px; }
 .per-source .n .vit { display: block; color: var(--ink-2); font-size: 12px; font-weight: 400; }
 .per-source .t { color: var(--ink-2); font-variant-numeric: tabular-nums; }

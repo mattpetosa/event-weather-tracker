@@ -30,3 +30,7 @@ A source failing is recorded on its own entry (`ok: false`) and never blocks the
     sudo nginx -t && sudo systemctl reload nginx
 
 Hash links open a day expanded, e.g. `https://weather.mhpwebserver.com/#2026-09-06`.
+
+## Headline weighting
+
+The tile headline is a **skill-weighted** mean, not a plain average (`source_weight()` in `collect.py`; the plain average is kept as `pop_plain`). Weights by lead time: ECMWF ensemble ×2, GEFS ×1.5, NWS ×1.5 (×2 inside 3 days), weather.com ×1.5, ECMWF/GFS ×1, GEM ×0.75, AccuWeather ×1 inside a week and ×0.5 beyond. The same weights apply to the hourly bars and the ceremony verdict. The min–max band is still the raw per-source range.
