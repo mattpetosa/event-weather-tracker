@@ -33,11 +33,13 @@ LOCATION = {"name": "Red Bank, NJ", "lat": 40.347, "lon": -74.064}
 EVENT_DAYS = ["2026-09-05", "2026-09-06", "2026-09-07"]
 KEY_DAY = "2026-09-06"
 
-UA_CONTACT = "weather.mhpwebserver.com (16355926+mattpetosa@users.noreply.github.com)"
+UA_CONTACT = os.environ.get("WEATHER_UA_CONTACT", "wedding-weather-tracker (https://github.com/mattpetosa/wedding-weather-tracker)")
 BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
 # Public key embedded in wunderground.com's own front end (TWC's consumer API).
-TWC_KEY = "e1f10a1e78da46f5b10a1e78da96f525"
+# Public consumer key that wunderground.com's own front end embeds (not a
+# secret; visible in any browser's network tab). Override with TWC_API_KEY.
+TWC_KEY = os.environ.get("TWC_API_KEY", "e1f10a1e78da46f5b10a1e78da96f525")
 ACCU_LOCATION_KEY = "339525"  # Red Bank, NJ 07701
 
 # ----------------------------------------------------------------------------
