@@ -87,13 +87,36 @@ def _mode(vals):
     return max(set(vals), key=vals.count) if vals else None
 
 
+MM_PER_INCH = 25.4
+
+
+def _inches(mm):
+    """Millimetres -> inches, rounded to the thousandth (0.001 in ~= 0.03 mm,
+    finer than any source's own resolution). None passes through."""
+    return None if mm is None else round(mm / MM_PER_INCH, 3)
+
+
+def _percentile(vals, q):
+    """Nearest-rank percentile over a list of numbers."""
+    vals = sorted(v for v in vals if v is not None)
+    if not vals:
+        return None
+    return vals[min(len(vals) - 1, max(0, round(q * (len(vals) - 1))))]
+
+
 def fill_daily_from_hourly(daily, hourly):
-    """Give every daily entry hum/wind/wdir, deriving from the daytime hours
-    when the source did not publish a daily figure itself."""
+    """Give every daily entry hum/wind/wdir and a daytime rain total, deriving
+    from the daytime hours when the source did not publish a daily figure
+    itself. Idempotent: only fills values that are still None/absent."""
     for date, entry in daily.items():
         hrs = [v for h, v in (hourly.get(date) or {}).items() if int(h) in DAY_WINDOW]
         hums = [v.get("hum") for v in hrs if v.get("hum") is not None]
         winds = [v.get("wind") for v in hrs if v.get("wind") is not None]
+        if entry.get("amt") is None:
+            amts = [v.get("amt") for v in hrs if v.get("amt") is not None]
+            # a partial day would silently understate the total, so require
+            # most of the daytime window before publishing a number
+            entry["amt"] = round(sum(amts), 3) if len(amts) >= 12 else None
         if entry.get("hum") is None:
             entry["hum"] = _int(sum(hums) / len(hums)) if len(hums) >= 6 else None
         if entry.get("wind") is None:
@@ -172,11 +195,13 @@ def parse_twc_hourly(d):
     hourly = _hourly_dict()
     for i, ts in enumerate(d["validTimeLocal"]):
         date, hour = _local_date_hour(ts)
+        qpf = d.get("qpf") or []          # TWC publishes qpf in inches already
         hourly[date][hour] = {"pop": _int(d["precipChance"][i]),
                               "temp": _int(d["temperature"][i]),
                               "hum": _int(d["relativeHumidity"][i]),
                               "wind": _int(d["windSpeed"][i]),
-                              "wdir": d["windDirectionCardinal"][i]}
+                              "wdir": d["windDirectionCardinal"][i],
+                              "amt": round(qpf[i], 3) if i < len(qpf) and qpf[i] is not None else None}
     return hourly
 
 
@@ -216,14 +241,18 @@ def parse_openmeteo(d):
             v["pop"] = _int(day_max[date])
     winds = hl.get("wind_speed_10m") or []
     dirs = hl.get("wind_direction_10m") or []
+    # Absent for any model queried without it, and for models that publish no
+    # precipitation at all — an amount-less source still parses.
+    precip = hl.get("precipitation") or []
     for i, ts in enumerate(hl.get("time", [])):
         date, hour = ts[:10], int(ts[11:13])
         hourly[date][hour] = {"pop": _int(pops[i]) if i < len(pops) else None,
                               "temp": _int(hl["temperature_2m"][i]),
                               "hum": _int(hums[i]) if i < len(hums) else None,
                               "wind": _int(winds[i]) if i < len(winds) else None,
-                              "wdir": _cardinal(dirs[i]) if i < len(dirs) else None}
-    return daily, hourly
+                              "wdir": _cardinal(dirs[i]) if i < len(dirs) else None,
+                              "amt": _inches(precip[i]) if i < len(precip) else None}
+    return fill_daily_from_hourly(daily, hourly), hourly
 
 
 WMO_CODES = {0: "Sunny", 1: "Mostly Sunny", 2: "Partly Cloudy", 3: "Cloudy",
@@ -257,15 +286,60 @@ def parse_nws_daily(d):
     return daily
 
 
-def parse_nws_hourly(d):
+_ISO_DUR = re.compile(r"^P(?:(\d+)D)?(?:T(?:(\d+)H)?)?$")
+
+
+def _duration_hours(dur):
+    """ISO-8601 duration as NWS writes it in a gridpoint validTime ('PT6H',
+    'P1DT6H'). Returns None for anything finer than an hour, which the
+    quantitativePrecipitation series never uses."""
+    m = _ISO_DUR.match(dur)
+    if not m:
+        return None
+    days, hours = m.group(1), m.group(2)
+    total = int(days or 0) * 24 + int(hours or 0)
+    return total or None
+
+
+def parse_nws_grid_qpf(grid):
+    """NWS gridpoint quantitativePrecipitation -> {date: {hour: inches}}.
+
+    The series comes in multi-hour blocks (usually PT6H) with the block's
+    total. Spread it evenly across the block's hours, the same convention the
+    ensembles already use once their data goes 6-hourly, so an hourly amount
+    means the same thing on every row of the chart."""
+    out = _hourly_dict()
+    series = (grid.get("properties", {}).get("quantitativePrecipitation") or {})
+    for block in series.get("values", []):
+        stamp, _, dur = block["validTime"].partition("/")
+        span = _duration_hours(dur)
+        value = block.get("value")
+        if not span or value is None:
+            continue
+        per_hour = _inches(value / span)
+        start = datetime.fromisoformat(stamp.replace("Z", "+00:00")).astimezone(TZ)
+        for k in range(span):
+            t = start + timedelta(hours=k)
+            out[t.strftime("%Y-%m-%d")][t.hour] = per_hour
+    return out
+
+
+def parse_nws_hourly(d, qpf=None):
     hourly = _hourly_dict()
+    qpf = qpf or {}
     for p in d["properties"]["periods"]:
         date, hour = _local_date_hour(p["startTime"])
         pop = (p.get("probabilityOfPrecipitation") or {}).get("value")
         wind, _ = _wind_from_text(p.get("windSpeed"))
         hourly[date][hour] = {"pop": _int(pop), "temp": _int(p["temperature"]),
                               "hum": _int((p.get("relativeHumidity") or {}).get("value")),
-                              "wind": wind, "wdir": p.get("windDirection")}
+                              "wind": wind, "wdir": p.get("windDirection"),
+                              "amt": (qpf.get(date) or {}).get(hour)}
+    # the gridpoint QPF runs ~7 days, past where the hourly periods stop
+    for date, hours in qpf.items():
+        for hour, amt in hours.items():
+            hourly[date].setdefault(hour, {"pop": None, "temp": None, "hum": None,
+                                           "wind": None, "wdir": None, "amt": amt})
     return hourly
 
 
@@ -277,6 +351,7 @@ def parse_metno(d):
     daily = {}
     hourly = _hourly_dict()
     blocks = defaultdict(list)
+    amounts = _hourly_dict()
     for ts in d["properties"]["timeseries"]:
         date, hour = _local_date_hour(ts["time"])
         data = ts["data"]
@@ -288,15 +363,34 @@ def parse_metno(d):
                                   "hum": _int(inst.get("relative_humidity")),
                                   "wind": _int(ws * 2.23694) if ws is not None else None,
                                   "wdir": _cardinal(inst.get("wind_from_direction"))}
+        one = (data.get("next_1_hours") or {}).get("details") or {}
         six = (data.get("next_6_hours") or {}).get("details") or {}
+        # 1-hourly amounts run out after ~2 days; spread the 6h blocks after
+        # that, the same convention as the ensembles and the NWS gridpoint
+        if "precipitation_amount" in one:
+            amounts[date][hour] = _inches(one["precipitation_amount"])
+        elif "precipitation_amount" in six:
+            per_hour = _inches(six["precipitation_amount"] / 6)
+            start = datetime.fromisoformat(ts["time"].replace("Z", "+00:00")).astimezone(TZ)
+            for k in range(6):
+                at = start + timedelta(hours=k)
+                amounts[at.strftime("%Y-%m-%d")].setdefault(at.hour, per_hour)
         if "air_temperature_max" in six and "air_temperature_min" in six:
             # a 6h block starting at 18:00+ local mostly belongs to the night → still that date
             blocks[date].append((six["air_temperature_max"], six["air_temperature_min"]))
+    for date, hours in amounts.items():
+        for hour, amt in hours.items():
+            entry = hourly[date].get(hour)
+            if entry is None:
+                hourly[date][hour] = {"pop": None, "temp": None, "hum": None,
+                                      "wind": None, "wdir": None, "amt": amt}
+            else:
+                entry["amt"] = amt
     for date, bl in blocks.items():
         if len(bl) >= 3:
             daily[date] = {"pop": None, "hi": _f_from_c(max(b[0] for b in bl)),
                            "lo": _f_from_c(min(b[1] for b in bl)), "cond": None}
-    return daily, hourly
+    return fill_daily_from_hourly(daily, hourly), hourly
 
 
 _ACCU_CARD = re.compile(
@@ -414,7 +508,10 @@ def parse_ensemble(d):
             tv = [t for t in tmps if t is not None]
             mean_t = sum(tv) / len(tv) if tv else None  # member mean, not the extreme member
             hourly[date][hour] = {"pop": round(100 * wet / n), "temp": _int(mean_t),
-                                  "hum": _int(hum), "wind": _int(wind), "wdir": None}
+                                  "hum": _int(hum), "wind": _int(wind), "wdir": None,
+                                  # ensemble-mean rainfall: the conventional QPF, and the
+                                  # only summary that adds up correctly across hours
+                                  "amt": _inches(sum(precs) / n)}
             if hour in DAY_WINDOW:
                 for k, p in enumerate(precs):
                     day_totals[k] += p
@@ -426,8 +523,13 @@ def parse_ensemble(d):
         daily[date] = {"pop": round(100 * wet_days / n),
                        "hi": _int(max(t_hi)) if t_hi else None,
                        "lo": _int(min(t_lo)) if t_lo else None,
-                       "cond": None, "members": n}
-    return daily, hourly
+                       "cond": None, "members": n,
+                       # the mean is what you should expect, the p90 is the wet
+                       # tail — a mean of 0.02" with a p90 of 0.3" is a very
+                       # different afternoon from one where both are 0.02".
+                       "amt_p90": _inches(_percentile(day_totals, 0.9))}
+    # daily amt is the sum of the hourly means over the daytime window
+    return fill_daily_from_hourly(daily, hourly), hourly
 
 
 # ----------------------------------------------------------------------------
@@ -450,7 +552,7 @@ def fetch_openmeteo(model, lon=None):
         q = urllib.parse.urlencode({
             "latitude": LOCATION["lat"], "longitude": lon or LOCATION["lon"],
             "daily": "precipitation_probability_max,temperature_2m_max,temperature_2m_min,weather_code",
-            "hourly": "precipitation_probability,temperature_2m,relative_humidity_2m,wind_speed_10m,wind_direction_10m",
+            "hourly": "precipitation_probability,precipitation,temperature_2m,relative_humidity_2m,wind_speed_10m,wind_direction_10m",
             "forecast_days": 16, "timezone": "America/New_York",
             "temperature_unit": "fahrenheit", "wind_speed_unit": "mph", "models": model})
         return parse_openmeteo(http_json("https://api.open-meteo.com/v1/forecast?" + q))
@@ -472,7 +574,13 @@ def fetch_nws():
     pts = http_json(f"https://api.weather.gov/points/{LOCATION['lat']},{LOCATION['lon']}")["properties"]
     d = http_json(pts["forecast"])
     h = http_json(pts["forecastHourly"])
-    return parse_nws_daily(d), parse_nws_hourly(h)
+    # the hourly product carries a probability but no amount; the raw gridpoint
+    # is the only place NWS publishes quantitativePrecipitation
+    try:
+        qpf = parse_nws_grid_qpf(http_json(pts["forecastGridData"]))
+    except Exception:  # noqa: BLE001 — an amount is a bonus, never worth losing NWS over
+        qpf = {}
+    return parse_nws_daily(d), parse_nws_hourly(h, qpf)
 
 
 def fetch_metno():
@@ -599,15 +707,42 @@ def _wavg(pairs):
     return round(sum(v * w for v, w in pairs) / tot), len(pairs)
 
 
-def source_weight(source_id, lead_days):
+# Open-Meteo does not publish a probability from a deterministic run — there
+# is none to publish — it derives precipitation_probability from that model's
+# own ensemble. So the `ecmwf` row's rain chance is a restatement of
+# `ecmwf_ens`, and `gfs`'s is a restatement of `gefs`: counting both as full
+# votes let one model family carry ×3 of the rain headline. Their
+# temperatures, humidity, wind and condition ARE the deterministic run and
+# stay independent, so the discount is applied per field, not per source.
+POP_TWINS = {"ecmwf": "ecmwf_ens", "gfs": "gefs"}
+TWIN_POP_WEIGHT = 0.25  # a token vote: a different threshold and window over the same ensemble
+
+
+def _wavg_f(pairs, places=3):
+    """Weighted mean that keeps its decimals — rainfall totals live well below
+    1, so the integer rounding _wavg does would flatten every one of them."""
+    pairs = [(v, w) for v, w in pairs if v is not None]
+    if not pairs:
+        return None, 0
+    tot = sum(w for _, w in pairs)
+    return round(sum(v * w for v, w in pairs) / tot, places), len(pairs)
+
+
+def source_weight(source_id, lead_days, field="temp"):
     """How much a source counts in the headline average, by how far out the
-    day is. Sources are not equally skilful: at 1–2 weeks the ensembles
-    (ECMWF ENS especially) are the best estimate on the page, a single
-    deterministic GFS/GEM run is close to noise, and AccuWeather's 15-day is
-    weak past about a week. NWS is human-adjusted and its trust ramps up as
-    the day approaches. Unknown ids count as a plain 1.0."""
+    day is, and for which field. Sources are not equally skilful: at 1–2 weeks
+    the ensembles (ECMWF ENS especially) are the best estimate on the page, a
+    single deterministic GFS/GEM run is close to noise, and AccuWeather's
+    15-day is weak past about a week. NWS is human-adjusted and its trust
+    ramps up as the day approaches. Unknown ids count as a plain 1.0.
+
+    field="pop" (or "amt") additionally discounts the deterministic rows whose
+    precipitation figures are derived from an ensemble already on the page —
+    see POP_TWINS."""
     if lead_days is None:
         lead_days = 7
+    if field in ("pop", "amt") and source_id in POP_TWINS:
+        return TWIN_POP_WEIGHT
     if source_id == "ecmwf_ens":
         return 2.0
     if source_id == "gefs":
@@ -631,27 +766,34 @@ def summarise(sources, days=EVENT_DAYS, today=None):
     for date in days:
         lead = (date_cls.fromisoformat(date) - today_d).days
         pops, his, los, conds, hums, winds, wdirs = [], [], [], [], [], [], []
+        amts, p90s = [], []
         weights = {}
         per_hour = defaultdict(list)
         per_hour_temp = defaultdict(list)
         per_hour_hum = defaultdict(list)
         per_hour_wind = defaultdict(list)
+        per_hour_amt = defaultdict(list)
         for s in sources:
             if not s.get("ok"):
                 continue
+            # precipitation is weighted separately: the deterministic rows get
+            # their rain figures from an ensemble that is already on the page
             w = source_weight(s.get("id"), lead)
+            wp = source_weight(s.get("id"), lead, "pop")
             d = s["daily"].get(date)
             if d:
-                weights[s.get("id") or f"source{len(weights)}"] = w
-                pops.append((d["pop"], w)); his.append((d["hi"], w)); los.append((d["lo"], w))
+                weights[s.get("id") or f"source{len(weights)}"] = wp
+                pops.append((d["pop"], wp)); his.append((d["hi"], w)); los.append((d["lo"], w))
                 if d.get("cond"):
                     conds.append(d["cond"])
                 hums.append((d.get("hum"), w)); winds.append((d.get("wind"), w)); wdirs.append(d.get("wdir"))
+                amts.append((d.get("amt"), wp)); p90s.append((d.get("amt_p90"), wp))
             for h, v in (s["hourly"].get(date) or {}).items():
-                per_hour[int(h)].append((v.get("pop"), w))
+                per_hour[int(h)].append((v.get("pop"), wp))
                 per_hour_temp[int(h)].append((v.get("temp"), w))
                 per_hour_hum[int(h)].append((v.get("hum"), w))
                 per_hour_wind[int(h)].append((v.get("wind"), w))
+                per_hour_amt[int(h)].append((v.get("amt"), wp))
         pop, pop_n = _wavg(pops)
         pop_plain, _ = _avg([v for v, _ in pops])
         hi, _ = _wavg(his)
@@ -662,14 +804,23 @@ def summarise(sources, days=EVENT_DAYS, today=None):
             t, _ = _wavg(per_hour_temp.get(h, []))
             hu, _ = _wavg(per_hour_hum.get(h, []))
             wi, _ = _wavg(per_hour_wind.get(h, []))
-            hourly.append({"h": h, "pop": p, "n": n, "temp": t, "hum": hu, "wind": wi})
+            am, am_n = _wavg_f(per_hour_amt.get(h, []))
+            hourly.append({"h": h, "pop": p, "n": n, "temp": t, "hum": hu, "wind": wi,
+                           "amt": am, "amt_n": am_n})
         valid = [v for v, _ in pops if v is not None]
+        valid_amt = [v for v, _ in amts if v is not None]
+        amt, amt_n = _wavg_f(amts)
         summary[date] = {
             "pop": pop, "pop_n": pop_n, "pop_plain": pop_plain,
             "pop_min": min(valid) if valid else None,
             "pop_max": max(valid) if valid else None,
             "lead_days": lead, "weights": weights,
             "hi": hi, "lo": lo,
+            # how much, not just how likely — a 60% chance of 0.02" is a
+            # different afternoon from a 60% chance of half an inch
+            "amt": amt, "amt_n": amt_n,
+            "amt_max": max(valid_amt) if valid_amt else None,
+            "amt_p90": _wavg_f(p90s)[0],
             "hum": _wavg(hums)[0], "hum_n": _wavg(hums)[1],
             "wind": _wavg(winds)[0], "wind_n": _wavg(winds)[1], "wdir": _mode(wdirs),
             # first source in priority order with a human-written phrase; the

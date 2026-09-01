@@ -33,6 +33,10 @@
     return ((h + 11) % 12 + 1) + ":" + String(m).padStart(2, "0") + (h < 12 ? "am" : "pm");
   }
   function deg(v) { return v == null ? "—" : v + "°"; }
+  // Rain totals live between 0 and about half an inch, where two decimals is
+  // the honest resolution — 0.1" is a damp hour, 0.01" is a few spots on a jacket.
+  function inches(v) { return v == null ? "—" : v.toFixed(2).replace(/^0/, "") + "\""; }
+  function isTrace(v) { return v != null && v < 0.005; }
   function fmtDay(iso) { const d = parseDay(iso); return MON[d.getMonth()] + " " + d.getDate(); }
 
   // The far end of a source's "YYYY-MM-DD → YYYY-MM-DD" coverage range, or
@@ -51,6 +55,12 @@
     const tpl = $("#day-tpl");
     const okCount = data.sources.filter(s => s.ok).length;
     let deepLinked = null;
+    // One rainfall scale for all three tiles so the bars are comparable day to
+    // day. It tracks the data rather than a fixed ceiling — pinned at 0.10"/h
+    // a drizzle day draws sub-pixel bars — and the caption always states the
+    // scale, so a tall bar on a .01" scale still reads as "barely anything".
+    const amtCeiling = Math.max(0.01, ...data.days.flatMap(d =>
+      (data.summary[d].hourly || []).map(h => h.amt || 0)));
 
     data.days.forEach(date => {
       const s = data.summary[date];
@@ -103,6 +113,20 @@
         meta.textContent = "Forecasts reach this far out only from some sources — check back later.";
       }
 
+      // how much, not just how likely
+      const amtLine = $(".amt-line", node);
+      if (s.amt != null) {
+        amtLine.hidden = false;
+        const parts = [isTrace(s.amt)
+          ? "Rainfall <b>a trace at most</b>"
+          : "Rainfall <b>" + inches(s.amt) + "</b> expected"];
+        if (s.amt_max != null && !isTrace(s.amt_max) && s.amt_max > s.amt)
+          parts.push("wettest source <b>" + inches(s.amt_max) + "</b>");
+        if (s.amt_p90 != null && !isTrace(s.amt_p90))
+          parts.push("1-in-10 wet case <b>" + inches(s.amt_p90) + "</b>");
+        amtLine.innerHTML = parts.join(" · ") + " · across <b>" + s.amt_n + "</b> source" + (s.amt_n === 1 ? "" : "s");
+      }
+
       // ceremony verdict
       if (isKey) {
         const win = s.hourly.filter(h => h.h >= KEY_WINDOW.from && h.h <= KEY_WINDOW.to && h.pop != null);
@@ -139,6 +163,16 @@
           li.innerHTML = label + " <b>" + val + "</b>";
           ul.appendChild(li);
         });
+        const winAmt = win.filter(h => h.amt != null);
+        if (winAmt.length) {
+          const total = winAmt.reduce((a, h) => a + h.amt, 0);
+          const el = document.createElement("p");
+          el.className = "sun";
+          el.innerHTML = isTrace(total)
+            ? "Expected rainfall in the window: <b>none</b> — the chance above is of a passing shower, not accumulation."
+            : "Expected rainfall in the window: <b>" + inches(total) + "</b>.";
+          v.appendChild(el);
+        }
         if (s.sun && s.sun.sunset) {
           const sunEl = $(".sun", v);
           sunEl.hidden = false;
@@ -163,7 +197,7 @@
         const inWindow = isKey && h.h >= KEY_WINDOW.from && h.h <= KEY_WINDOW.to;
         b.className = "h" + (h.pop == null ? " na" : "") + ((h.h < 6 || h.h >= 21) ? " night" : "") + (inWindow ? " gold" : "");
         b.style.height = h.pop == null ? "2px" : Math.max(2, h.pop) + "%";
-        b.title = hourLabel(h.h) + ": " + (h.pop == null ? "no hourly data" : h.pop + "% · " + h.n + " src" + (h.temp != null ? " · " + h.temp + "°" : "") + (h.hum != null ? " · " + h.hum + "% hum" : "") + (h.wind != null ? " · " + h.wind + " mph" : ""));
+        b.title = hourLabel(h.h) + ": " + (h.pop == null ? "no hourly data" : h.pop + "% · " + h.n + " src" + (h.temp != null ? " · " + h.temp + "°" : "") + (h.hum != null ? " · " + h.hum + "% hum" : "") + (h.wind != null ? " · " + h.wind + " mph" : "") + (h.amt != null ? " · " + inches(h.amt) + "/h" : ""));
         const nearWindow = isKey && h.h >= KEY_WINDOW.from - 1 && h.h <= KEY_WINDOW.to + 1;
         if (h.pop != null && (inWindow || (h.h % 3 === 0 && !nearWindow))) {
           const l = document.createElement("span");
@@ -172,6 +206,28 @@
         }
         hours.appendChild(b);
       });
+      // rainfall by the hour, on the same axis as the chance bars above
+      const amtRow = $(".amounts", node);
+      const anyAmt = s.hourly.some(h => h.amt != null);
+      if (anyAmt) {
+        amtRow.hidden = false;
+        s.hourly.forEach(h => {
+          const a = document.createElement("div");
+          const inWindow = isKey && h.h >= KEY_WINDOW.from && h.h <= KEY_WINDOW.to;
+          a.className = "a" + (h.amt > 0.02 ? " wet" : "") + (inWindow ? " gold" : "");
+          a.style.height = h.amt == null ? "0"
+            : Math.max(2, Math.min(100, (h.amt / amtCeiling) * 100)) + "%";
+          a.title = hourLabel(h.h) + ": " + (h.amt == null ? "no amount published" :
+            (isTrace(h.amt) ? "no rain" : inches(h.amt) + " in the hour") + " · " + h.amt_n + " src");
+          amtRow.appendChild(a);
+        });
+        const acap = $(".amt-cap", node);
+        acap.hidden = false;
+        acap.textContent = "Bars above: chance of rain. Below: how much — a full-height bar is " +
+          inches(amtCeiling) + " in the hour.";
+      } else {
+        amtRow.remove();
+      }
       if (isKey && s.hourly_available) {
         const cap = document.createElement("p");
         cap.className = "window-cap";
@@ -183,6 +239,8 @@
         p.className = "meta"; p.textContent = "No source has published hourly detail this far out yet.";
         hours.replaceWith(p);
         $(".hour-axis", node).remove();
+        const strip = $(".amounts", node); if (strip) strip.remove();
+        const acap = $(".amt-cap", node); if (acap) acap.remove();
       }
 
       // per-source
@@ -199,6 +257,12 @@
           vit.textContent = (d.hum != null ? d.hum + "% humidity" : "") + (d.hum != null && d.wind != null ? " · " : "") +
             (d.wind != null ? d.wind + " mph" + (d.wdir ? " " + d.wdir : "") : "");
           n.appendChild(vit);
+        }
+        if (src.ok && d && d.amt != null) {
+          const rain = document.createElement("span"); rain.className = "vit";
+          rain.textContent = (isTrace(d.amt) ? "no measurable rain" : inches(d.amt) + " of rain") +
+            (d.amt_p90 != null && !isTrace(d.amt_p90) ? " · wettest runs " + inches(d.amt_p90) : "");
+          n.appendChild(rain);
         }
         const t = document.createElement("span"); t.className = "t";
         const p = document.createElement("span"); p.className = "p";

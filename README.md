@@ -36,3 +36,11 @@ Hash links open a day expanded, e.g. `https://weather.mhpwebserver.com/#2026-09-
 ## Headline weighting
 
 The tile headline is a **skill-weighted** mean, not a plain average (`source_weight()` in `collect.py`; the plain average is kept as `pop_plain`). Weights by lead time: ECMWF ensemble ×2, GEFS ×1.5, NWS ×1.5 (×2 inside 3 days), weather.com ×1.5, ECMWF/GFS ×1, GEM ×0.75, AccuWeather ×1 inside a week and ×0.5 beyond. The same weights apply to the hourly bars and the ceremony verdict. The min–max band is still the raw per-source range.
+
+Weights are **per field**. Open-Meteo has no probability to publish from a deterministic run, so it derives `precipitation_probability` from that model's own ensemble — which means the `ecmwf` row's rain chance restates `ecmwf_ens`, and `gfs`'s restates `gefs`. Counted as full votes, one model family carried ×3 of the rain headline. For rain (`field="pop"`) those two rows drop to ×0.25; for temperature, humidity, wind and condition they keep full weight, because those really are an independent deterministic run. `GEM` is not discounted — it has no ensemble row on the page to duplicate.
+
+## Rainfall amounts
+
+Every source but AccuWeather publishes an amount as well as a chance, and a 60% chance of 0.02" is a very different afternoon from 60% of half an inch. Amounts are stored in inches per hour (`amt` on each hourly entry, summed over `DAY_WINDOW` for the daily figure) and drawn as a strip hanging below the hourly chance bars, on a shared scale across the three days that the caption always states.
+
+Sources differ in what they give: weather.com has a native hourly `qpf`; Open-Meteo carries `precipitation`; the ensembles use the **member mean** (the conventional QPF, and the only summary that adds up across hours) plus `amt_p90`, the 90th-percentile member day total — the wet tail. NWS publishes `quantitativePrecipitation` only on the raw gridpoint, in 6-hour blocks that reach ~3.5 days out, and met.no's blocks reach ~9; both are spread evenly across their hours, the same convention the ensembles already use once their data goes 6-hourly. AccuWeather publishes no amount at any range.

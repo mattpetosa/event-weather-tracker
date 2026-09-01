@@ -130,6 +130,21 @@ h1 span { font-weight: 400; color: var(--ink-2); font-size: .72em; }
   position: absolute; left: 50%; bottom: 100%; transform: translateX(-50%);
   font-size: 8.5px; color: var(--ink-2); padding-bottom: 2px; white-space: nowrap;
 }
+/* Rainfall strip: hangs below the chance chart off the same 24-hour axis, so
+   "how likely" reads above the line and "how much" below it. */
+.amounts {
+  display: grid; grid-template-columns: repeat(24, 1fr); gap: 2px; height: 46px;
+  align-items: start; margin-top: 3px;
+}
+.amounts .a {
+  background: var(--rain); opacity: .45; border-radius: 0 0 3px 3px; min-height: 0;
+  transition: height .5s ease;
+}
+.amounts .a.wet { opacity: .8; }
+.amounts .a.gold { background: var(--gold); opacity: .9; }
+.amt-line { margin: 6px 0 0; font-size: 13px; color: var(--ink-3); }
+.amt-line b { color: var(--ink-2); font-weight: 500; }
+.amt-cap { margin: -10px 0 16px; font-size: 11px; color: var(--ink-3); }
 .hour-axis { display: flex; justify-content: space-between; font-size: 11px; color: var(--ink-3); margin: 4px 0 16px; }
 .per-source { list-style: none; margin: 0; padding: 0; }
 .per-source li {

@@ -89,7 +89,8 @@ def test_summary_averages_only_available_values():
     d = s["2026-09-06"]
     assert d["pop"] == 30 and d["pop_n"] == 2 and d["pop_min"] == 20 and d["pop_max"] == 40
     assert d["hi"] == 82 and d["lo"] == 61 and d["cond"] == "Sunny"
-    assert d["hourly"][12] == {"h": 12, "pop": 20, "n": 2, "temp": 78, "hum": None, "wind": None}
+    assert d["hourly"][12] == {"h": 12, "pop": 20, "n": 2, "temp": 78, "hum": None,
+                               "wind": None, "amt": None, "amt_n": 0}
     assert d["hourly"][0]["pop"] is None
     assert s["2026-09-07"]["pop"] is None and s["2026-09-07"]["hourly_available"] is False
 
@@ -285,3 +286,110 @@ def test_summary_headline_is_weighted_and_plain_average_kept():
     assert s["hourly"][12]["pop"] > 20
     assert s["pop_n"] == 2 and s["pop_min"] == 0 and s["pop_max"] == 40
     assert s["weights"]["ecmwf_ens"] > s["weights"]["accuweather"]
+
+
+# ---------------------------------------------------------------------------
+# rain amount ("how much", not just "how likely") and family de-duplication
+# ---------------------------------------------------------------------------
+
+def test_source_weight_pop_dedups_the_ensemble_twins():
+    """Open-Meteo derives precipitation_probability from a model's ensemble,
+    so the deterministic ECMWF/GFS rows re-state their own ensemble row's
+    opinion. They must not count as independent votes for rain."""
+    assert c.source_weight("ecmwf", 5, "pop") < c.source_weight("ecmwf", 5, "temp")
+    assert c.source_weight("gfs", 5, "pop") < c.source_weight("gfs", 5, "temp")
+    # the ensembles themselves and the independent sources are untouched
+    for sid in ("ecmwf_ens", "gefs", "nws", "twc", "accuweather", "gem"):
+        assert c.source_weight(sid, 5, "pop") == c.source_weight(sid, 5, "temp")
+    # GEM has no ensemble row on the page, so it is duplicating nothing
+    assert c.source_weight("gem", 5, "pop") == 0.75
+    # the ECMWF family still outweighs a lone deterministic run
+    assert c.source_weight("ecmwf_ens", 5, "pop") > c.source_weight("ecmwf", 5, "pop")
+    # default field keeps the old single-argument behaviour
+    assert c.source_weight("ecmwf", 5) == c.source_weight("ecmwf", 5, "temp")
+
+
+def test_summary_pop_dedup_does_not_touch_temperature():
+    """The det rows keep full weight for temps — those are a real independent
+    run — while their rain vote is discounted."""
+    srcs = [
+        {"id": "ecmwf_ens", "ok": True, "daily": {"2026-09-06": {"pop": 60, "hi": 70, "lo": 60}}, "hourly": {}},
+        {"id": "ecmwf", "ok": True, "daily": {"2026-09-06": {"pop": 60, "hi": 70, "lo": 60}}, "hourly": {}},
+        {"id": "gem", "ok": True, "daily": {"2026-09-06": {"pop": 0, "hi": 90, "lo": 60}}, "hourly": {}},
+    ]
+    s = c.summarise(srcs, ["2026-09-06"], today="2026-09-01")["2026-09-06"]
+    # pop: ecmwf_ens 2.0 + ecmwf 0.25 vs gem 0.75  ->  60*2.25/3.0 = 45
+    assert s["pop"] == 45
+    # hi: ecmwf_ens 2.0 + ecmwf 1.0 vs gem 0.75  ->  (70*3 + 90*.75)/3.75 = 74
+    assert s["hi"] == 74
+    # the published weights describe the headline, which is the rain number
+    assert s["weights"]["ecmwf"] == 0.25
+
+
+def test_twc_hourly_amount_in_inches():
+    h = c.parse_twc_hourly(fx("twc_hourly.json"))
+    day = h["2026-09-06"]
+    assert all("amt" in v for v in day.values())
+    assert all(v["amt"] is None or v["amt"] >= 0 for v in day.values())
+
+
+def test_openmeteo_hourly_amount_is_inches_and_optional():
+    d, h = c.parse_openmeteo(fx("openmeteo_ecmwf_precip.json"))
+    amts = [v["amt"] for v in h["2026-09-06"].values()]
+    assert len(amts) == 24 and all(a is not None for a in amts)
+    assert all(0 <= a < 5 for a in amts), "inches, not millimetres"
+    assert d["2026-09-06"]["amt"] == round(sum(
+        h["2026-09-06"][hr]["amt"] for hr in c.DAY_WINDOW), 3)
+    # a model queried without the precipitation field must still parse
+    d2, h2 = c.parse_openmeteo(fx("openmeteo_ecmwf.json"))
+    assert all(v["amt"] is None for v in h2["2026-09-06"].values())
+    assert d2["2026-09-06"]["amt"] is None
+
+
+def test_ensemble_amount_is_member_mean_with_a_p90_day_total():
+    d, h = c.parse_ensemble(fx("ensemble_ecmwf.json"))
+    day = d["2026-09-06"]
+    assert day["amt"] is not None and day["amt"] >= 0
+    assert day["amt_p90"] >= day["amt"], "the wet tail sits above the mean"
+    # hourly means sum to the daytime day total
+    assert day["amt"] == round(sum(h["2026-09-06"][hr]["amt"] for hr in c.DAY_WINDOW), 3)
+
+
+def test_nws_grid_qpf_is_spread_evenly_over_its_block():
+    q = c.parse_nws_grid_qpf(fx("nws_grid.json"))
+    # 2026-09-01T18:00Z/PT6H = 7.874 mm over 2pm-8pm local -> 0.052 in/h
+    assert q["2026-09-01"][14] == round(7.874 / 25.4 / 6, 3)
+    assert q["2026-09-01"][14] == q["2026-09-01"][19]
+    assert 15 not in q.get("2026-08-31", {}), "no hours invented outside the blocks"
+
+
+def test_metno_hourly_amount():
+    d, h = c.parse_metno(fx("metno.json"))
+    first = h["2026-08-25"]
+    assert any(v.get("amt") is not None for v in first.values())
+    assert all(v.get("amt") is None or v["amt"] >= 0 for v in first.values())
+
+
+def test_summary_amount_is_weighted_hourly_and_daily():
+    srcs = [
+        {"id": "ecmwf_ens", "ok": True,
+         "daily": {"2026-09-06": {"pop": 60, "hi": 70, "lo": 60, "amt": 0.4, "amt_p90": 1.0}},
+         "hourly": {"2026-09-06": {"12": {"pop": 60, "temp": 70, "amt": 0.4}}}},
+        {"id": "gem", "ok": True,
+         "daily": {"2026-09-06": {"pop": 0, "hi": 70, "lo": 60, "amt": 0.0}},
+         "hourly": {"2026-09-06": {"12": {"pop": 0, "temp": 70, "amt": 0.0}}}},
+    ]
+    s = c.summarise(srcs, ["2026-09-06"], today="2026-09-01")["2026-09-06"]
+    # 0.4*2.0 / (2.0+0.75) = 0.291
+    assert s["amt"] == 0.291
+    assert s["amt_max"] == 0.4, "wettest source, for the range"
+    assert s["amt_p90"] == 1.0
+    assert s["hourly"][12]["amt"] == 0.291
+    assert s["amt_n"] == 2
+
+
+def test_summary_amount_absent_when_no_source_publishes_one():
+    srcs = [{"id": "accuweather", "ok": True,
+             "daily": {"2026-09-06": {"pop": 70, "hi": 75, "lo": 65}}, "hourly": {}}]
+    s = c.summarise(srcs, ["2026-09-06"], today="2026-09-01")["2026-09-06"]
+    assert s["amt"] is None and s["amt_n"] == 0 and s["amt_p90"] is None
