@@ -55,26 +55,6 @@ def test_metno_temps_only_and_partial_days_dropped():
     assert "2026-09-03" not in d  # only 1 block that day → dropped
     assert h["2026-08-25"][12]["temp"] is not None
 
-def test_accuweather_daily_cards():
-    d = c.parse_accuweather_daily(fx("accuweather_daily.html"), year_hint=2026)
-    assert len(d) == 15
-    assert d["2026-08-24"] == {"pop": 25, "hi": 81, "lo": 62, "cond": "Partly sunny", "hum": None, "wind": 7, "wdir": "SW"}
-    assert d["2026-08-25"]["pop"] == 3
-    for day in c.EVENT_DAYS:
-        assert day in d and d[day]["pop"] is not None, day
-
-def test_accuweather_year_rollover():
-    page = fx("accuweather_daily.html").replace('sub date">8/', 'sub date">12/').replace('sub date">9/', 'sub date">1/')
-    d = c.parse_accuweather_daily(page, year_hint=2026)
-    assert "2027-01-07" in d
-
-def test_accuweather_hourly_epoch_ids():
-    h = c.parse_accuweather_hourly(fx("accuweather_hourly_day2.html"))
-    assert "2026-08-25" in h
-    day = h["2026-08-25"]
-    assert len(day) >= 20
-    assert all(v["pop"] is not None for v in day.values())
-    assert all(v["temp"] is not None for v in day.values())
 
 def test_summary_averages_only_available_values():
     srcs = [
@@ -154,9 +134,8 @@ def test_humidity_wind_per_source():
     assert 0 < v["hum"] <= 100 and v["wind"] >= 0 and v["wdir"] in c._CARDINALS
     _, om = c.parse_openmeteo(fx("openmeteo_ecmwf.json"))
     assert om["2026-09-06"][12]["hum"] and om["2026-09-06"][12]["wdir"]
-    ah = c.parse_accuweather_hourly(fx("accuweather_hourly_day2.html"))
-    v = next(iter(ah["2026-08-25"].values()))
-    assert v["hum"] and v["wind"] == 7 and v["wdir"] == "W"
+    fd = c.parse_foreca_daily(fx("foreca_daily.json"))["2026-09-01"]
+    assert fd["hum"] == 62 and fd["wind"] == 4 and fd["wdir"] == "SW"
     ed, eh = c.parse_ensemble(fx("ensemble_ecmwf.json"))
     assert eh["2026-09-06"][12]["hum"] and eh["2026-09-06"][12]["wind"] is not None
 
@@ -204,23 +183,6 @@ def test_coverage_is_null_when_a_source_returns_no_days():
         "2026-09-05 → 2026-09-07"
 
 
-def test_accuweather_card_does_not_inherit_the_next_day_s_wind():
-    """The phrase and wind live in the panel after the card, so the search
-    has to run past the card's </a> — but a fixed 2500-char window ran into
-    the following day (real panels are 570–1120 chars apart). A day whose
-    panel omitted the wind quietly reported tomorrow's."""
-    page = fx("accuweather_daily.html")
-    cards = list(c._ACCU_CARD.finditer(page))
-    panel = page[cards[0].end():cards[1].start()]
-    stripped = (page[:cards[0].end()]
-                + c._ACCU_WIND.sub("", panel, count=1)
-                + page[cards[1].start():])
-    d = c.parse_accuweather_daily(stripped)
-    assert d["2026-08-24"]["wind"] is None
-    assert d["2026-08-24"]["wdir"] is None
-    assert d["2026-08-25"]["wind"] == 8 and d["2026-08-25"]["wdir"] == "W"
-
-
 def test_openmeteo_survives_a_short_weather_code_array():
     """GEM stops returning weather_code past day 10 while still returning
     temperatures. Indexing a padded [None] * 99 covered a missing array but
@@ -265,8 +227,8 @@ def test_best_match_blend_is_not_a_source():
 def test_source_weight_by_lead_time():
     # ECMWF ensemble is the most skilful thing on the page at 1–2 weeks out
     assert c.source_weight("ecmwf_ens", 11) > c.source_weight("gfs", 11)
-    # AccuWeather's 15-day is weak past a week; fine inside it
-    assert c.source_weight("accuweather", 11) < c.source_weight("accuweather", 3)
+    # a commercial 15-day is weak past a week; fine inside it
+    assert c.source_weight("foreca", 11) < c.source_weight("foreca", 3)
     # NWS earns more trust as the day approaches
     assert c.source_weight("nws", 2) > c.source_weight("nws", 6)
     # unknown / test sources count as a plain 1.0
@@ -277,7 +239,7 @@ def test_summary_headline_is_weighted_and_plain_average_kept():
     srcs = [
         {"id": "ecmwf_ens", "ok": True, "daily": {"2026-09-06": {"pop": 40, "hi": 80, "lo": 60}},
          "hourly": {"2026-09-06": {"12": {"pop": 40, "temp": 80}}}},
-        {"id": "accuweather", "ok": True, "daily": {"2026-09-06": {"pop": 0, "hi": 80, "lo": 60}},
+        {"id": "foreca", "ok": True, "daily": {"2026-09-06": {"pop": 0, "hi": 80, "lo": 60}},
          "hourly": {"2026-09-06": {"12": {"pop": 0, "temp": 80}}}},
     ]
     s = c.summarise(srcs, ["2026-09-06"], today="2026-08-26")["2026-09-06"]
@@ -285,7 +247,7 @@ def test_summary_headline_is_weighted_and_plain_average_kept():
     assert s["pop"] > 20, "headline leans toward the ensemble"
     assert s["hourly"][12]["pop"] > 20
     assert s["pop_n"] == 2 and s["pop_min"] == 0 and s["pop_max"] == 40
-    assert s["weights"]["ecmwf_ens"] > s["weights"]["accuweather"]
+    assert s["weights"]["ecmwf_ens"] > s["weights"]["foreca"]
 
 
 # ---------------------------------------------------------------------------
@@ -299,7 +261,7 @@ def test_source_weight_pop_dedups_the_ensemble_twins():
     assert c.source_weight("ecmwf", 5, "pop") < c.source_weight("ecmwf", 5, "temp")
     assert c.source_weight("gfs", 5, "pop") < c.source_weight("gfs", 5, "temp")
     # the ensembles themselves and the independent sources are untouched
-    for sid in ("ecmwf_ens", "gefs", "nws", "twc", "accuweather", "gem"):
+    for sid in ("ecmwf_ens", "gefs", "icon_ens", "nws", "twc", "foreca", "gem"):
         assert c.source_weight(sid, 5, "pop") == c.source_weight(sid, 5, "temp")
     # GEM has no ensemble row on the page, so it is duplicating nothing
     assert c.source_weight("gem", 5, "pop") == 0.75
@@ -389,7 +351,69 @@ def test_summary_amount_is_weighted_hourly_and_daily():
 
 
 def test_summary_amount_absent_when_no_source_publishes_one():
-    srcs = [{"id": "accuweather", "ok": True,
+    srcs = [{"id": "foreca", "ok": True,
              "daily": {"2026-09-06": {"pop": 70, "hi": 75, "lo": 65}}, "hourly": {}}]
     s = c.summarise(srcs, ["2026-09-06"], today="2026-09-01")["2026-09-06"]
     assert s["amt"] is None and s["amt_n"] == 0 and s["amt_p90"] is None
+
+
+# ---------------------------------------------------------------------------
+# Foreca (replaced AccuWeather as the second commercial forecaster, 2026-09-01)
+# ---------------------------------------------------------------------------
+
+def test_foreca_daily_converts_its_metric_units():
+    """Foreca serves metric no matter what unit params you send: temps in C,
+    wind in m/s, rain in mm. Verified 2026-09-01 against Open-Meteo (30C=86F
+    vs 88.6F) and by correlating the 13-day wind series (x2.237 -> 7.2 mph
+    mean vs 8.3; as-if-mph would be 3.2, far too low)."""
+    d = c.parse_foreca_daily(fx("foreca_daily.json"))
+    day = d["2026-09-01"]        # raw: tmax 30, tmin 22, winds 2, windd 211, rain 8.71
+    assert day["hi"] == 86 and day["lo"] == 72
+    assert day["wind"] == 4 and day["wdir"] == "SW"
+    assert day["amt"] == 0.343
+    assert day["pop"] == 70 and day["hum"] == 62
+    assert "rain" in day["cond"].lower()
+
+
+def test_foreca_daily_covers_the_event_days():
+    d = c.parse_foreca_daily(fx("foreca_daily.json"))
+    for day in c.EVENT_DAYS:
+        assert day in d
+        _valid_day(d[day])
+
+
+def test_foreca_returns_no_hourly():
+    """Foreca's hourly endpoint 404s, so the source is daily-only: it feeds the
+    day tiles but must not claim hours it does not have."""
+    daily, hourly = c.parse_foreca(fx("foreca_daily.json"))
+    assert daily and all(not hours for hours in hourly.values())
+
+
+def test_icon_ensemble_parses_all_forty_members():
+    daily, hourly = c.parse_ensemble(fx("ensemble_icon.json"))
+    for day in c.EVENT_DAYS:
+        assert daily[day]["members"] == 40
+        assert 0 <= daily[day]["pop"] <= 100
+        assert daily[day]["hi"] > daily[day]["lo"]
+        assert daily[day]["amt"] is not None
+
+
+def test_icon_ensemble_reads_a_land_cell_not_the_sst_cell():
+    """ECMWF's 0.25 cell at Red Bank is open Atlantic: sea level, and flat
+    70-73F sea-surface temps EVERY day. ICON's land mask calls the same cell
+    land, so unlike ECMWF it needs no longitude nudge. A marine cell is flat
+    on every day, so the guard is the warmest day's swing, not the coolest --
+    the member mean legitimately flattens on days the members disagree about
+    (Sept 6 spans just 3F across 40 runs that individually swing 7-11F)."""
+    raw = fx("ensemble_icon.json")
+    assert raw["elevation"] > 0                      # 13m: land, not sea surface
+    daily, hourly = c.parse_ensemble(raw)
+    swings = [daily[d]["hi"] - daily[d]["lo"] for d in c.EVENT_DAYS]
+    assert max(swings) > 8
+
+
+def test_new_sources_are_weighted_below_the_established_ensembles():
+    assert c.source_weight("icon_ens", 5) < c.source_weight("gefs", 5)
+    assert c.source_weight("icon_ens", 5) > c.source_weight("gem", 5)
+    # a commercial 15-day is weak at range, the way AccuWeather's was
+    assert c.source_weight("foreca", 11) < c.source_weight("foreca", 3)

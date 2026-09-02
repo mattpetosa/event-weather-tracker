@@ -40,7 +40,7 @@ BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 # Public consumer key that wunderground.com's own front end embeds (not a
 # secret; visible in any browser's network tab). Override with TWC_API_KEY.
 TWC_KEY = os.environ.get("TWC_API_KEY", "e1f10a1e78da46f5b10a1e78da96f525")
-ACCU_LOCATION_KEY = "339525"  # Red Bank, NJ 07701
+FORECA_LOCATION_ID = "105103159"  # Red Bank, Monmouth, NJ (lat/lon matches LOCATION)
 
 # ----------------------------------------------------------------------------
 # small helpers
@@ -227,7 +227,7 @@ def parse_openmeteo(d):
     pops = hl.get("precipitation_probability") or []
     hums = hl.get("relative_humidity_2m") or []
     # Daily pop: precipitation_probability_max is the 24-hour max, overnight
-    # included, while TWC/AccuWeather/NWS and the ensembles publish a
+    # included, while TWC/Foreca/NWS and the ensembles publish a
     # *daytime* chance. Re-derive it as the max over DAY_WINDOW from the
     # hourly array so the rows are comparable (fall back to the 24 h figure
     # if the day has no hourly data).
@@ -393,79 +393,38 @@ def parse_metno(d):
     return fill_daily_from_hourly(daily, hourly), hourly
 
 
-_ACCU_CARD = re.compile(
-    r'<a class="daily-forecast-card[^"]*" href="[^"]*">(.*?)</a>', re.S)
-_ACCU_DATE = re.compile(r'class="module-header sub date">\s*(\d+)/(\d+)\s*<')
-_ACCU_HI = re.compile(r'class="high">\s*(-?\d+)')
-_ACCU_LO = re.compile(r'class="low">\s*/\s*(-?\d+)')
-_ACCU_POP = re.compile(r'class="precip">.*?(\d+)%', re.S)
-_ACCU_PHRASE = re.compile(r'class="phrase">([^<]*)<')
-_ACCU_WIND = re.compile(r'Wind<span class="value">([^<]+)<')
-_ACCU_HUM = re.compile(r'Humidity<span class="value">\s*(\d+)%')
+MPH_PER_MS = 2.236936
 
 
-def parse_accuweather_daily(page: str, year_hint: int | None = None):
-    """Server-rendered 15-day cards. Year is inferred from the header
-    'August 24 - September 7' range crossing Dec->Jan if needed."""
+def parse_foreca_daily(d):
+    """Foreca's daily JSON. It serves metric regardless of the unit params you
+    send (tempunit=F/units=us are all silently ignored), so temps arrive in C,
+    wind in m/s and rain in mm. Verified 2026-09-01: tmax 30 vs Open-Meteo's
+    88.6F for the same day, and the 13-day wind series x2.237 averages 7.2 mph
+    against Open-Meteo's 8.3 -- read as mph it would average 3.2, far too low."""
     daily = {}
-    year = year_hint or datetime.now(TZ).year
-    prev_month = None
-    cards = list(_ACCU_CARD.finditer(page))
-    for i, m in enumerate(cards):
-        card = m.group(1)
-        dm = _ACCU_DATE.search(card)
-        if not dm:
+    for row in d.get("data") or []:
+        date = row.get("date")
+        if not date:
             continue
-        month, day = int(dm.group(1)), int(dm.group(2))
-        if prev_month and month < prev_month:
-            year += 1
-        prev_month = month
-        date = f"{year:04d}-{month:02d}-{day:02d}"
-        hi, lo, pop = _ACCU_HI.search(card), _ACCU_LO.search(card), _ACCU_POP.search(card)
-        # The phrase and wind sit in the expandable panel that follows the
-        # card, so the search has to run past the card's own </a>. It must
-        # stop at the NEXT card, though: a fixed 2500-char window ran
-        # straight into the following day, so a card whose panel omitted the
-        # wind (or was shorter than the window) silently inherited tomorrow's
-        # figure and reported it as today's.
-        stop = cards[i + 1].start() if i + 1 < len(cards) else len(page)
-        tail = page[m.end():min(m.end() + 2500, stop)]
-        ph = _ACCU_PHRASE.search(tail)
-        wm = _ACCU_WIND.search(tail)
-        wind, wdir = _wind_from_text(html.unescape(wm.group(1)) if wm else None)
         daily[date] = {
-            "pop": _int(pop.group(1)) if pop else None,
-            "hi": _int(hi.group(1)) if hi else None,
-            "lo": _int(lo.group(1)) if lo else None,
-            "cond": html.unescape(ph.group(1).strip()) if ph else None,
-            "hum": None, "wind": wind, "wdir": wdir,
+            "pop": _int(row.get("rainp")),
+            "hi": _f_from_c(row.get("tmax")), "lo": _f_from_c(row.get("tmin")),
+            "cond": (row.get("symbtxt") or None),
+            "hum": _int(row.get("rhum")),
+            "wind": _int(row["winds"] * MPH_PER_MS) if row.get("winds") is not None else None,
+            "wdir": _cardinal(row.get("windd")),
+            "amt": _inches(row.get("rain")),
         }
     return daily
 
 
-_ACCU_HOUR = re.compile(
-    r'<div id="(\d{9,11})" data-qa="\d+" class="accordion-item hour"(.*?)(?=<div id="\d{9,11}" data-qa=|<!-- end hourly|$)', re.S)
-_ACCU_HTEMP = re.compile(r'class="temp[^"]*">\s*(-?\d+)')
+def parse_foreca(d):
+    """Daily only: Foreca's hourly endpoint 404s for this location id, so the
+    source feeds the day tiles and stays out of the hourly bars and the
+    ceremony verdict rather than inventing hours it does not have."""
+    return parse_foreca_daily(d), _hourly_dict()
 
-
-def parse_accuweather_hourly(page: str):
-    hourly = _hourly_dict()
-    for m in _ACCU_HOUR.finditer(page):
-        epoch = int(m.group(1))
-        body = m.group(2)
-        dt = datetime.fromtimestamp(epoch, tz=timezone.utc).astimezone(TZ)
-        pop = _ACCU_POP.search(body)
-        temp = _ACCU_HTEMP.search(body)
-        hm = _ACCU_HUM.search(body)
-        wm = _ACCU_WIND.search(body)
-        wind, wdir = _wind_from_text(html.unescape(wm.group(1)) if wm else None)
-        hourly[dt.strftime("%Y-%m-%d")][dt.hour] = {
-            "pop": _int(pop.group(1)) if pop else None,
-            "temp": _int(temp.group(1)) if temp else None,
-            "hum": _int(hm.group(1)) if hm else None,
-            "wind": wind, "wdir": wdir,
-        }
-    return hourly
 
 POP_THRESHOLD_MM = 0.254   # 0.01 inch — the NWS "measurable precipitation" bar, applied to the day's total
 HOURLY_THRESHOLD_MM = 0.05 # per hour. Beyond ~day 6 the ensembles are 6-hourly and Open-Meteo spreads each
@@ -588,40 +547,27 @@ def fetch_metno():
     return parse_metno(d)
 
 
-def fetch_accuweather():
-    # Akamai rejects curl/urllib TLS fingerprints; curl_cffi impersonates Chrome.
+def fetch_foreca():
+    # Foreca fronts its JSON with the same Akamai-style TLS check AccuWeather
+    # used, so the Chrome impersonation curl_cffi gives us is still needed.
     from curl_cffi import requests as cffi_requests
-    s = cffi_requests.Session(impersonate="chrome")
-    base = f"https://www.accuweather.com/en/us/red-bank/07701"
-    r = s.get(f"{base}/daily-weather-forecast/{ACCU_LOCATION_KEY}", timeout=30)
+    r = cffi_requests.get(
+        f"https://api.foreca.net/data/daily/{FORECA_LOCATION_ID}.json?dataset=full&lang=en",
+        impersonate="chrome", timeout=30)
     r.raise_for_status()
-    daily = parse_accuweather_daily(r.text)
-    hourly = _hourly_dict()
-    for day in range(1, 5):  # AccuWeather only serves 4 days of hourly without premium
-        try:
-            rh = s.get(f"{base}/hourly-weather-forecast/{ACCU_LOCATION_KEY}?day={day}", timeout=30)
-            if rh.status_code == 200 and "Hourly Weather" in rh.text:
-                for date, hours in parse_accuweather_hourly(rh.text).items():
-                    hourly[date].update(hours)
-        except Exception:  # noqa: BLE001 — hourly is best-effort
-            pass
-        finally:
-            # In a finally, not at the end of the try: a request that raised
-            # skipped the pause entirely, so the four hourly pages went out
-            # back to back precisely when Akamai was already unhappy with us
-            # — the moment the courtesy gap matters most.
-            if day < 4:
-                time.sleep(1.5)
-    return daily, hourly
+    return parse_foreca(r.json())
 
 
 SOURCES = [
     {"id": "twc", "name": "The Weather Channel", "short": "weather.com",
      "url": "https://weather.com/weather/tenday/l/40.347,-74.064", "fetch": fetch_twc,
      "note": "Same forecast engine behind Weather Underground"},
-    {"id": "accuweather", "name": "AccuWeather", "short": "AccuWeather",
-     "url": "https://www.accuweather.com/en/us/red-bank/07701/daily-weather-forecast/339525",
-     "fetch": fetch_accuweather, "note": "Hourly detail only within 4 days"},
+    # Foreca sits in the slot AccuWeather held: summarise() takes the condition
+    # phrase from the first source in this list that publishes one, and that
+    # order is deliberately weather.com -> commercial -> NWS.
+    {"id": "foreca", "name": "Foreca", "short": "Foreca",
+     "url": "https://www.foreca.com/United-States/New-Jersey/Red-Bank",
+     "fetch": fetch_foreca, "note": "Commercial forecaster behind MSN and Bing Weather \u2014 daily only"},
     {"id": "nws", "name": "National Weather Service", "short": "NWS / NOAA",
      "url": "https://forecast.weather.gov/MapClick.php?lat=40.347&lon=-74.064", "fetch": fetch_nws,
      "note": "7-day forecast — appears once the day is within a week"},
@@ -631,6 +577,11 @@ SOURCES = [
     {"id": "gefs", "name": "GEFS ensemble (31 runs)", "short": "GEFS",
      "url": "https://open-meteo.com/en/docs/ensemble-api", "fetch": fetch_ensemble("gfs_seamless"),
      "note": "Share of 31 NOAA model runs that produce measurable daytime rain"},
+    # No lon override, unlike ECMWF: ICON's land mask calls the 40.25,-74.0
+    # cell land (elevation 13m), so it is not the sea-surface cell ECMWF hits.
+    {"id": "icon_ens", "name": "ICON ensemble (40 runs)", "short": "ICON ENS",
+     "url": "https://open-meteo.com/en/docs/ensemble-api", "fetch": fetch_ensemble("icon_seamless"),
+     "note": "Share of 40 German (DWD) model runs that produce measurable daytime rain"},
     {"id": "ecmwf", "name": "ECMWF (European model)", "short": "ECMWF",
      "url": "https://open-meteo.com/", "fetch": fetch_openmeteo("ecmwf_ifs025", lon=-74.15),
      "note": "via Open-Meteo, nearest land grid cell"},
@@ -732,8 +683,8 @@ def source_weight(source_id, lead_days, field="temp"):
     """How much a source counts in the headline average, by how far out the
     day is, and for which field. Sources are not equally skilful: at 1–2 weeks
     the ensembles (ECMWF ENS especially) are the best estimate on the page, a
-    single deterministic GFS/GEM run is close to noise, and AccuWeather's
-    15-day is weak past about a week. NWS is human-adjusted and its trust
+    single deterministic GFS/GEM run is close to noise, and a commercial
+    15-day (Foreca) is weak past about a week. NWS is human-adjusted and its trust
     ramps up as the day approaches. Unknown ids count as a plain 1.0.
 
     field="pop" (or "amt") additionally discounts the deterministic rows whose
@@ -751,7 +702,11 @@ def source_weight(source_id, lead_days, field="temp"):
         return 2.0 if lead_days <= 3 else 1.5
     if source_id == "twc":
         return 1.5
-    if source_id == "accuweather":
+    if source_id == "icon_ens":
+        # a third independent ensemble, but held below ECMWF ENS and GEFS so
+        # that adding it does not tilt the headline wet on member count alone
+        return 1.0
+    if source_id == "foreca":
         return 1.0 if lead_days <= 7 else 0.5
     if source_id in ("ecmwf", "gfs"):
         return 1.0
@@ -824,7 +779,7 @@ def summarise(sources, days=EVENT_DAYS, today=None):
             "hum": _wavg(hums)[0], "hum_n": _wavg(hums)[1],
             "wind": _wavg(winds)[0], "wind_n": _wavg(winds)[1], "wdir": _mode(wdirs),
             # first source in priority order with a human-written phrase; the
-            # four Open-Meteo model rows would otherwise outvote weather.com/AccuWeather/NWS
+            # five Open-Meteo model rows would otherwise outvote weather.com/Foreca/NWS
             "cond": conds[0] if conds else None,
             "hourly": hourly,
             "hourly_available": any(x["n"] for x in hourly),
