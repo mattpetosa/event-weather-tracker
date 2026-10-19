@@ -10,5 +10,7 @@ def _no_network(monkeypatch):
     monkeypatch.setattr(sources, "http_get", blocked)
     monkeypatch.setattr(sources, "cffi_json", blocked)
     sources._FORECA_IDS.clear()
+    sources._CELL_OFFSETS.clear()
     yield
     sources._FORECA_IDS.clear()
+    sources._CELL_OFFSETS.clear()

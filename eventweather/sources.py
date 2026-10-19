@@ -528,6 +528,74 @@ def fetch_twc(place, ctx):
     return parse_twc_daily(d, place.zone), parse_twc_hourly(h, place.zone)
 
 
+# A coastal point can sit in a model grid cell that is mostly water: that row
+# then reports sea-surface temperature, flat day and night (the original site
+# saw 70-73°F all day from ECMWF). A sea cell is flat on EVERY day, so the
+# test is the largest daily swing; one flat day is ensemble-mean smoothing.
+SEA_SWING_F = 4
+INLAND_ELEVATION_M = 100
+NEIGHBOURS = ((0, -0.25), (0, 0.25), (-0.25, 0), (0.25, 0))
+LAND_NOTE = "nearest land grid cell used (this model's own cell here is over water)"
+SEA_NOTE = "temperatures left out: this model's grid cell here is over water"
+_CELL_OFFSETS = {}
+_CELL_LOCK = threading.Lock()
+
+
+def looks_like_sea(hourly):
+    swings = []
+    for hours in hourly.values():
+        temps = [v["temp"] for v in hours.values() if v.get("temp") is not None]
+        if len(temps) >= 18:
+            swings.append(max(temps) - min(temps))
+    return bool(swings) and max(swings) < SEA_SWING_F
+
+
+def _without_temps(daily, hourly):
+    for d in daily.values():
+        for k in ("hi", "lo", "hum", "wind", "wdir"):
+            d[k] = None
+    for hours in hourly.values():
+        for v in hours.values():
+            for k in ("temp", "hum", "wind", "wdir"):
+                v[k] = None
+    return daily, hourly
+
+
+def _shift(lat, lon, dlat, dlon):
+    return max(-90.0, min(90.0, lat + dlat)), ((lon + dlon + 180) % 360) - 180
+
+
+def land_cell(place, key, at):
+    """Fetch via at(lat, lon) -> (daily, hourly, elevation), stepping off a
+    sea grid cell when needed. Returns (daily, hourly, note)."""
+    full_key = key + place.cache_key()
+    with _CELL_LOCK:
+        known = _CELL_OFFSETS.get(full_key, "unknown")
+    if known is None:
+        daily, hourly, _ = at(place.lat, place.lon)
+        return (*_without_temps(daily, hourly), SEA_NOTE)
+    if known != "unknown":
+        daily, hourly, _ = at(*_shift(place.lat, place.lon, *known))
+        return daily, hourly, (LAND_NOTE if known != (0, 0) else None)
+    daily, hourly, elevation = at(place.lat, place.lon)
+    if (elevation is not None and elevation >= INLAND_ELEVATION_M) or not looks_like_sea(hourly):
+        with _CELL_LOCK:
+            _CELL_OFFSETS[full_key] = (0, 0)
+        return daily, hourly, None
+    for off in NEIGHBOURS:
+        try:
+            d2, h2, _ = at(*_shift(place.lat, place.lon, *off))
+        except Exception:  # noqa: BLE001 — a failed neighbour is just not the answer
+            continue
+        if not looks_like_sea(h2):
+            with _CELL_LOCK:
+                _CELL_OFFSETS[full_key] = off
+            return d2, h2, LAND_NOTE
+    with _CELL_LOCK:
+        _CELL_OFFSETS[full_key] = None
+    return (*_without_temps(daily, hourly), SEA_NOTE)
+
+
 def fetch_openmeteo(model):
     def fetch(place, ctx):
         def at(lat, lon):
@@ -539,8 +607,7 @@ def fetch_openmeteo(model):
             raw = ctx.json("https://api.open-meteo.com/v1/forecast?" + q)
             daily, hourly = parse_openmeteo(raw)
             return daily, hourly, raw.get("elevation")
-        daily, hourly, _ = at(place.lat, place.lon)
-        return daily, hourly
+        return land_cell(place, ("forecast", model), at)
     return fetch
 
 
@@ -554,8 +621,7 @@ def fetch_ensemble(model):
             raw = ctx.json("https://ensemble-api.open-meteo.com/v1/ensemble?" + q)
             daily, hourly = parse_ensemble(raw)
             return daily, hourly, raw.get("elevation")
-        daily, hourly, _ = at(place.lat, place.lon)
-        return daily, hourly
+        return land_cell(place, ("ensemble", model), at)
     return fetch
 
 
