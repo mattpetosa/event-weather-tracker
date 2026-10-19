@@ -68,6 +68,7 @@ class RateLimiter:
 class App:
     def __init__(self, cfg, service, www_dir, search=None, clock=time.monotonic):
         self.cfg, self.service, self.clock = cfg, service, clock
+        self.conn_timeout = 30      # seconds a client may sit idle mid-request
         self.www = os.path.realpath(www_dir)
         self.search = search or self._search_upstream
         self.limiter = RateLimiter(clock)
@@ -139,6 +140,7 @@ class App:
 def make_handler(app):
     class Handler(BaseHTTPRequestHandler):
         server_version = "EventWeather"
+        timeout = app.conn_timeout   # drop half-sent requests instead of holding a thread
         sys_version = ""
 
         def do_GET(self):

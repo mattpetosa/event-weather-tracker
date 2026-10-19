@@ -148,3 +148,25 @@ def test_rate_limiter_window():
 
 def test_unknown_api_path_is_404(server):
     assert get(server, "/api/nope")[0] == 404
+
+
+def test_idle_connections_are_dropped():
+    """A client that sends half a request must not hold a thread forever."""
+    import socket
+    import time as _time
+    cfg = Config()
+    svc = ForecastService(cfg, [], clock=lambda: NOW)
+    app = App(cfg, svc, WWW_DIR)
+    assert app.conn_timeout == 30
+    app.conn_timeout = 0.5
+    httpd = make_server(app, "127.0.0.1", 0)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        s = socket.create_connection(("127.0.0.1", httpd.server_address[1]), timeout=5)
+        s.sendall(b"GET / HTTP/1.1\r\nHost: x\r\n")      # never finish the headers
+        t0 = _time.monotonic()
+        assert s.recv(1024) == b""                       # server hangs up
+        assert _time.monotonic() - t0 < 3
+        s.close()
+    finally:
+        httpd.shutdown()
