@@ -1,8 +1,11 @@
-"""One day's consensus from many forecasts: skill weights, the summary and
-sunrise/sunset. (The event-window verdict joins this file in a later step.)"""
+"""One day's consensus from many forecasts: skill weights, the summary,
+sunrise/sunset and the verdict for the event window."""
 from __future__ import annotations
 
+import copy
+import json
 import math
+import re
 from collections import defaultdict
 from datetime import date as date_cls, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -202,3 +205,135 @@ def summarise_day(sources, date, today, lat, lon, tz):
         "hourly_available": any(x["n"] for x in hourly),
         "sun": sun_times(date, lat, lon, tz),
     }
+
+
+# ----------------------------------------------------------------------------
+# the event window and its verdict
+# ----------------------------------------------------------------------------
+
+HORIZON_DAYS = 15   # Open-Meteo's 16 forecast days = today + 15
+DEFAULT_RULES = {
+    "rain": {"good": 20, "watch": 35},           # peak hourly chance, %
+    "wind": {"good": 10, "watch": 15},           # mph
+    "hum": {"good": 65, "watch": 75},            # %
+    "temp": {"good": [65, 80], "watch": [55, 85]},  # °F ranges
+}
+CHECK_NAMES = {"rain": "rain", "wind": "wind", "hum": "humidity", "temp": "temperature"}
+_HHMM = re.compile(r"([01]\d|2[0-3]):([0-5]\d)")
+
+
+def load_rules(path=None):
+    rules = copy.deepcopy(DEFAULT_RULES)
+    if not path:
+        return rules
+    try:
+        with open(path) as f:
+            override = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        raise ValueError(f"can't read rules file {path}: {e}") from None
+    if not isinstance(override, dict):
+        raise ValueError("rules file must hold a JSON object")
+    for key, levels in override.items():
+        if key not in rules or not isinstance(levels, dict):
+            raise ValueError(f"unknown rule {key!r}; use rain, wind, hum or temp")
+        for level, v in levels.items():
+            if level not in ("good", "watch"):
+                raise ValueError(f"{key}.{level}: use good or watch")
+            if key == "temp":
+                ok = (isinstance(v, list) and len(v) == 2 and v[0] <= v[1]
+                      and all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in v))
+            else:
+                ok = isinstance(v, (int, float)) and not isinstance(v, bool)
+            if not ok:
+                raise ValueError(f"{key}.{level}: bad value {v!r}")
+            rules[key][level] = v
+    return rules
+
+
+def parse_window(start, end):
+    def minutes(s):
+        m = _HHMM.fullmatch(s or "")
+        if not m:
+            raise ValueError(f"bad time {s!r}; use HH:MM, 24-hour")
+        return int(m.group(1)) * 60 + int(m.group(2))
+    a, b = minutes(start), minutes(end)
+    if b <= a:
+        raise ValueError("the event must end after it starts, on the same day")
+    return a, b
+
+
+def window_hours(start, end):
+    """Clock hours the window touches: 16:30-18:30 -> [16, 17, 18]."""
+    a, b = parse_window(start, end)
+    return [h for h in range(24) if h * 60 < b and (h + 1) * 60 > a]
+
+
+def date_state(date, today):
+    d = date_cls.fromisoformat(date)
+    if d < today:
+        return "past", None
+    if (d - today).days > HORIZON_DAYS:
+        return "too_far", (d - timedelta(days=HORIZON_DAYS)).isoformat()
+    return "ok", None
+
+
+def _grade(v, r):
+    if v is None:
+        return None
+    return "good" if v <= r["good"] else "watch" if v <= r["watch"] else "concern"
+
+
+def _grade_temp(t, r):
+    if t is None:
+        return None
+    if r["good"][0] <= t <= r["good"][1]:
+        return "good"
+    if r["watch"][0] <= t <= r["watch"][1]:
+        return "watch"
+    return "concern"
+
+
+def _mean(vals):
+    vals = [v for v in vals if v is not None]
+    return round(sum(vals) / len(vals)) if vals else None
+
+
+def _first(*vals):
+    return next((v for v in vals if v is not None), None)
+
+
+def verdict(summary, hours, rules=DEFAULT_RULES):
+    rows = [summary["hourly"][h] for h in hours]
+    pops = [r["pop"] for r in rows if r["pop"] is not None]
+    hourly = bool(pops)
+    if hourly:
+        values = {"rain": max(pops),
+                  "wind": _first(_mean(r["wind"] for r in rows), summary.get("wind")),
+                  "hum": _first(_mean(r["hum"] for r in rows), summary.get("hum")),
+                  "temp": _first(_mean(r["temp"] for r in rows), summary.get("hi"))}
+        amts = [r["amt"] for r in rows if r.get("amt") is not None]
+        window_amt = round(sum(amts), 3) if amts else None
+    else:
+        values = {"rain": summary.get("pop"), "wind": summary.get("wind"),
+                  "hum": summary.get("hum"), "temp": summary.get("hi")}
+        window_amt = None
+    checks, no_data = [], []
+    for key in ("rain", "wind", "hum", "temp"):
+        v = values[key]
+        g = _grade_temp(v, rules["temp"]) if key == "temp" else _grade(v, rules[key])
+        if g is None:
+            no_data.append(CHECK_NAMES[key])
+        else:
+            checks.append({"key": key, "value": v, "grade": g})
+    concerns = [CHECK_NAMES[c["key"]] for c in checks if c["grade"] == "concern"]
+    watches = [CHECK_NAMES[c["key"]] for c in checks if c["grade"] == "watch"]
+    if not checks:
+        grade, label = None, "No forecast for the event window yet"
+    elif concerns:
+        grade, label = "concern", "Concern: " + ", ".join(concerns)
+    elif watches:
+        grade, label = "watch", "Keep an eye on: " + ", ".join(watches)
+    else:
+        grade, label = "good", "Looks good"
+    return {"grade": grade, "label": label, "basis": "hourly" if hourly else "daily",
+            "checks": checks, "no_data": no_data, "window_amt": window_amt}
