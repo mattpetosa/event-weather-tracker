@@ -3,37 +3,59 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="robots" content="noindex">
 <title>Event Weather Tracker</title>
+<meta name="description" content="Will the weather hold for your event? Every major forecast for one place, one day and the hours that matter.">
 <meta name="theme-color" content="#E8EEF3">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&family=Instrument+Sans:wght@400;500;600&display=swap" rel="stylesheet">
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
-<link rel="stylesheet" href="style.css?v=7">
+<link rel="stylesheet" href="style.css?v=8">
 </head>
 <body>
 <header class="masthead">
-  <p class="eyebrow">Red Bank, New Jersey</p>
-  <h1>Weather outlook<br><span>Sept 5 – 7</span></h1>
-  <p class="status" id="status">Loading forecasts…</p>
+  <p class="eyebrow">Event Weather Tracker</p>
+  <h1>Will the weather hold<br><span>for your event?</span></h1>
 </header>
 
-<main id="days" class="days" aria-live="polite"></main>
+<form id="event-form" class="event-form" autocomplete="off" novalidate>
+  <div class="field place-field">
+    <label for="place">Place</label>
+    <div class="place-wrap">
+      <input id="place" name="place" type="text" placeholder="Town or city" required
+             role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="place-list">
+      <ul id="place-list" class="place-list" role="listbox" hidden></ul>
+    </div>
+  </div>
+  <div class="row">
+    <div class="field"><label for="date">Date</label><input id="date" name="date" type="date" required></div>
+    <div class="field"><label for="from">Starts</label><input id="from" name="from" type="time" step="900" value="16:00" required></div>
+    <div class="field"><label for="to">Ends</label><input id="to" name="to" type="time" step="900" value="18:00" required></div>
+  </div>
+  <div class="form-actions">
+    <button class="go" type="submit">Show forecast</button>
+    <button class="units" id="units" type="button" aria-pressed="false">Show °C</button>
+  </div>
+</form>
+
+<p class="status" id="status" aria-live="polite"></p>
+<main id="result" class="days" aria-live="polite"></main>
 
 <section class="method">
   <h2>How this number is made</h2>
-  <p>Every hour this page pulls the forecast for Red Bank from each source below and averages the daily chance of rain across whichever ones cover that day. The bar fills to the average; the faint band behind it shows the lowest and highest chance any single source gives, so a short band means the sources agree.</p>
-  <p>Tap a day to see the chance hour by hour (averaged across the sources that publish hourly detail) and every source's own number.</p>
+  <p>For the place and day you pick, the server asks each source below for its forecast and averages the chance of rain across whichever ones reach that day, giving the more skilful ones more weight. The bar fills to that average; the faint band behind it shows the lowest and highest chance any single source gives, so a short band means the sources agree.</p>
+  <p>Your event's hours are gold on the hourly chart. The verdict looks only at those hours: the highest hourly chance of rain, and the average wind, humidity and temperature. Until hourly forecasts reach the date it uses the day's figures.</p>
+  <p>Forecasts reach about 16 days ahead and are refreshed at most once an hour.</p>
   <ul class="sources" id="sources"></ul>
 </section>
 
 <footer class="foot">
-  <p id="generated"></p>
+  <p>Times are local to the event. <a href="https://github.com/mattpetosa/event-weather-tracker">Event Weather Tracker</a> is open source.</p>
 </footer>
 
 <template id="day-tpl">
-  <article class="day" tabindex="0" role="button" aria-expanded="false">
+  <article class="day key">
+    <span class="eyebrow-tag"></span>
     <div class="day-head">
       <div class="when">
         <span class="dow"></span>
@@ -41,6 +63,7 @@
       </div>
       <div class="temps"><span class="hi"></span><span class="lo"></span></div>
     </div>
+    <p class="where"></p>
     <p class="cond"></p>
     <dl class="vitals">
       <div><dt>Humidity</dt><dd class="hum"></dd></div>
@@ -57,12 +80,11 @@
     </div>
     <p class="meta"></p>
     <p class="amt-line" hidden></p>
-    <div class="verdict" hidden>
+    <div class="verdict">
       <p class="verdict-head"><span class="verdict-label"></span><span class="verdict-text"></span></p>
       <ul class="factors"></ul>
-      <p class="sun" hidden></p>
     </div>
-    <div class="detail" hidden>
+    <div class="detail">
       <h3>By the hour</h3>
       <div class="hours"></div>
       <div class="amounts" hidden></div>
@@ -74,6 +96,6 @@
   </article>
 </template>
 
-<script src="app.js?v=8"></script>
+<script src="app.js?v=9"></script>
 </body>
 </html>

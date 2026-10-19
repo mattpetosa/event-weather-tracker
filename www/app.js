@@ -2,341 +2,366 @@
   "use strict";
   const $ = (s, r) => (r || document).querySelector(s);
   const DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-  const KEY_WINDOW = { from: 16, to: 18, label: "Ceremony & cocktail hour, 4:30–6:30pm" };
-  // Thresholds for a seated, dressed-up crowd in late-afternoon sun: [good max, watch max]
-  const RULES = {
-    rain: { good: 20, watch: 35 },
-    wind: { good: 8, watch: 12 },   // waterfront lawn at the Molly Pitcher Inn: exposed to the river breeze
-    hum:  { good: 65, watch: 70 },
-  };
-  function grade(v, r) { return v == null ? null : v <= r.good ? "good" : v <= r.watch ? "watch" : "concern"; }
-  function gradeTemp(t) { return t == null ? null : (t >= 68 && t <= 78) ? "good" : (t >= 62 && t <= 82) ? "watch" : "concern"; }
-  function avgOf(rows, k) { const v = rows.map(r => r[k]).filter(x => x != null); return v.length ? Math.round(v.reduce((a, b) => a + b, 0) / v.length) : null; }
   const MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  // Places that use °F / mph by default; everyone else gets metric.
+  const IMPERIAL = new Set(["US", "PR", "GU", "VI", "AS", "MP", "LR", "MM"]);
+  const UNITS_KEY = "ewt-units";
+  const NEED = ["place", "lat", "lon", "tz", "date", "from", "to"];
 
-  function parseDay(iso) {
-    const [y, m, d] = iso.split("-").map(Number);
-    return new Date(y, m - 1, d);
-  }
-  function fmtTime(iso) {
-    const d = new Date(iso);
-    return d.toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" });
-  }
-  function hourLabel(h) {
-    if (h === 0) return "12am";
-    if (h === 12) return "noon";
-    return h < 12 ? h + "am" : (h - 12) + "pm";
-  }
+  let metric = false;
+  let chosen = null;     // {name, lat, lon, tz, cc} once a suggestion is picked
+  let lastData = null;
+
+  // ---- storage (may be blocked: private windows, previews) ----
+  function store(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* per-viewer nicety only */ } }
+  function recall(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+
+  // ---- formatting ----
+  function parseDay(iso) { const [y, m, d] = iso.split("-").map(Number); return new Date(y, m - 1, d); }
+  function fmtDay(iso) { const d = parseDay(iso); return MON[d.getMonth()] + " " + d.getDate(); }
+  function longDay(iso) { const d = parseDay(iso); return DOW[d.getDay()] + " " + MON[d.getMonth()] + " " + d.getDate(); }
+  function fmtTime(iso) { return new Date(iso).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" }); }
+  function hourLabel(h) { return h === 0 ? "12am" : h === 12 ? "noon" : h < 12 ? h + "am" : (h - 12) + "pm"; }
   function fmtClock(hhmm) {
     if (!hhmm) return "—";
     const [h, m] = hhmm.split(":").map(Number);
     return ((h + 11) % 12 + 1) + ":" + String(m).padStart(2, "0") + (h < 12 ? "am" : "pm");
   }
-  function deg(v) { return v == null ? "—" : v + "°"; }
-  // Rain totals live between 0 and about half an inch, where two decimals is
-  // the honest resolution — 0.1" is a damp hour, 0.01" is a few spots on a jacket.
-  function inches(v) { return v == null ? "—" : v.toFixed(2).replace(/^0/, "") + "\""; }
+  function deg(f) { return f == null ? "—" : (metric ? Math.round((f - 32) * 5 / 9) : f) + "°"; }
+  function speed(mph) { return mph == null ? "—" : metric ? Math.round(mph * 1.609) + " km/h" : mph + " mph"; }
+  // Rain lives between 0 and about half an inch; two decimals (or tenths of
+  // a mm) is the honest resolution.
+  function rain(inch) {
+    if (inch == null) return "—";
+    return metric ? (inch * 25.4).toFixed(1) + " mm" : inch.toFixed(2).replace(/^0/, "") + "\"";
+  }
   function isTrace(v) { return v != null && v < 0.005; }
-  function fmtDay(iso) { const d = parseDay(iso); return MON[d.getMonth()] + " " + d.getDate(); }
+  function el(tag, cls, text) {
+    const n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text != null) n.textContent = text;
+    return n;
+  }
+  function bold(text) { return el("b", null, text); }
 
-  // The far end of a source's "YYYY-MM-DD → YYYY-MM-DD" coverage range, or
-  // "" for anything that isn't one. collect.py writes null when a source
-  // came back with no days at all, and this is not the place to find out
-  // the hard way that it wrote something else.
-  function coverageEnd(coverage) {
-    if (typeof coverage !== "string") return "";
-    const end = coverage.split("→")[1];
-    return end ? end.trim() : "";
+  function setStatus(text, err) {
+    const st = $("#status");
+    st.textContent = text || "";
+    st.classList.toggle("err", !!err);
+  }
+
+  // ---- units ----
+  function applyUnits(cc) {
+    const saved = recall(UNITS_KEY);
+    metric = saved ? saved === "metric" : !IMPERIAL.has((cc || "").toUpperCase());
+    syncUnitsButton();
+  }
+  function syncUnitsButton() {
+    const b = $("#units");
+    b.textContent = metric ? "Show °F" : "Show °C";
+    b.setAttribute("aria-pressed", String(metric));
+  }
+  $("#units").addEventListener("click", () => {
+    metric = !metric;
+    store(UNITS_KEY, metric ? "metric" : "imperial");
+    syncUnitsButton();
+    if (lastData) show(lastData);
+  });
+
+  // ---- place search ----
+  const placeInput = $("#place"), list = $("#place-list");
+  let timer = null, seq = 0, options = [], active = -1;
+
+  placeInput.addEventListener("input", () => {
+    chosen = null;
+    clearTimeout(timer);
+    const q = placeInput.value.trim();
+    if (q.length < 2) { closeList(); return; }
+    timer = setTimeout(() => search(q), 250);
+  });
+  placeInput.addEventListener("keydown", e => {
+    if (list.hidden || !options.length) return;
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      active = (active + (e.key === "ArrowDown" ? 1 : -1) + options.length) % options.length;
+      [...list.children].forEach((li, i) => li.classList.toggle("active", i === active));
+      placeInput.setAttribute("aria-activedescendant", "place-opt-" + active);
+    } else if (e.key === "Enter" && active >= 0) {
+      e.preventDefault(); pick(active);
+    } else if (e.key === "Escape") {
+      closeList();
+    }
+  });
+  placeInput.addEventListener("blur", () => setTimeout(closeList, 120));
+
+  function search(q) {
+    const mine = ++seq;
+    fetch("/api/places?q=" + encodeURIComponent(q))
+      .then(r => r.json().then(j => ({ ok: r.ok, j }), () => ({ ok: false, j: {} })))
+      .then(({ ok, j }) => {
+        if (mine !== seq) return;
+        if (!ok) throw new Error(j.error || "place search failed");
+        showList(j.results || []);
+      })
+      .catch(err => { if (mine === seq) { closeList(); setStatus(err.message, true); } });
+  }
+  function showList(results) {
+    options = results; active = -1;
+    list.innerHTML = "";
+    results.forEach((r, i) => {
+      const li = el("li", null, r.label);
+      li.id = "place-opt-" + i;
+      li.setAttribute("role", "option");
+      li.addEventListener("mousedown", e => { e.preventDefault(); pick(i); });
+      list.appendChild(li);
+    });
+    if (!results.length) list.appendChild(el("li", "empty", "No matching places"));
+    list.hidden = false;
+    placeInput.setAttribute("aria-expanded", "true");
+  }
+  function closeList() {
+    list.hidden = true;
+    placeInput.setAttribute("aria-expanded", "false");
+    placeInput.removeAttribute("aria-activedescendant");
+  }
+  function pick(i) {
+    const r = options[i];
+    chosen = { name: r.label, lat: r.lat, lon: r.lon, tz: r.tz, cc: r.country_code || "" };
+    placeInput.value = r.label;
+    closeList();
+    setStatus("");
+  }
+
+  // ---- form + URL ----
+  $("#event-form").addEventListener("submit", e => {
+    e.preventDefault();
+    if (!chosen) { setStatus("Pick a place from the suggestions list.", true); placeInput.focus(); return; }
+    const date = $("#date").value, from = $("#from").value, to = $("#to").value;
+    if (!date || !from || !to) { setStatus("Enter the date and the event's start and end time.", true); return; }
+    if (from >= to) { setStatus("The event must end after it starts, on the same day.", true); return; }
+    const q = new URLSearchParams({ place: chosen.name, lat: chosen.lat, lon: chosen.lon, tz: chosen.tz,
+                                    cc: chosen.cc, date, from, to });
+    history.pushState(null, "", "?" + q.toString());
+    load(q);
+  });
+  window.addEventListener("popstate", fromUrl);
+
+  function fromUrl() {
+    const q = new URLSearchParams(location.search);
+    if (!NEED.every(k => q.get(k))) { $("#result").innerHTML = ""; lastData = null; return; }
+    chosen = { name: q.get("place"), lat: +q.get("lat"), lon: +q.get("lon"), tz: q.get("tz"), cc: q.get("cc") || "" };
+    placeInput.value = chosen.name;
+    $("#date").value = q.get("date"); $("#from").value = q.get("from"); $("#to").value = q.get("to");
+    load(q);
+  }
+
+  function load(q) {
+    const api = new URLSearchParams({ name: q.get("place"), lat: q.get("lat"), lon: q.get("lon"), tz: q.get("tz"),
+                                      cc: q.get("cc") || "", date: q.get("date"), from: q.get("from"), to: q.get("to") });
+    applyUnits(q.get("cc"));
+    lastData = null;
+    $("#result").innerHTML = "";
+    setStatus("Fetching forecasts… the first look at a place takes a few seconds.");
+    fetch("/api/forecast?" + api.toString())
+      .then(r => r.json().then(j => ({ ok: r.ok, j }), () => ({ ok: false, j: { error: "HTTP " + r.status } })))
+      .then(({ ok, j }) => { if (!ok) throw new Error(j.error || "request failed"); lastData = j; show(j); })
+      .catch(err => setStatus("Couldn't get the forecast: " + err.message, true));
+  }
+
+  // ---- result ----
+  function show(data) {
+    const result = $("#result");
+    result.innerHTML = "";
+    if (data.status === "too_far") {
+      const box = el("div", "notice");
+      box.appendChild(el("p", null, "Forecasts don't reach " + longDay(data.date) + " yet. They will on " +
+        longDay(data.available_from) + ", so check back then."));
+      result.appendChild(box);
+      renderSources([]);
+      setStatus(data.place.name);
+      return;
+    }
+    try { render(data); } catch (e) { setStatus("Couldn't show the forecast (" + e.message + ").", true); }
   }
 
   function render(data) {
-    const days = $("#days");
-    days.innerHTML = "";
-    const tpl = $("#day-tpl");
-    const okCount = data.sources.filter(s => s.ok).length;
-    let deepLinked = null;
-    // One rainfall scale for all three tiles so the bars are comparable day to
-    // day. It tracks the data rather than a fixed ceiling — pinned at 0.10"/h
-    // a drizzle day draws sub-pixel bars — and the caption always states the
-    // scale, so a tall bar on a .01" scale still reads as "barely anything".
-    const amtCeiling = Math.max(0.01, ...data.days.flatMap(d =>
-      (data.summary[d].hourly || []).map(h => h.amt || 0)));
+    const s = data.summary, v = data.verdict, date = data.date, w = data.window;
+    const gold = new Set(w.hours);
+    const node = $("#day-tpl").content.firstElementChild.cloneNode(true);
+    const dt = parseDay(date);
+    const windowText = fmtClock(w.from) + "–" + fmtClock(w.to);
 
-    data.days.forEach(date => {
-      const s = data.summary[date];
-      const node = tpl.content.firstElementChild.cloneNode(true);
-      const dt = parseDay(date);
-      const isKey = date === data.key_day;
-      if (isKey) {
-        node.classList.add("key");
-        const tag = document.createElement("span");
-        tag.className = "eyebrow-tag";
-        tag.textContent = "The big day";
-        node.prepend(tag);
-      }
-      $(".dow", node).textContent = DOW[dt.getDay()];
-      $(".date", node).textContent = MON[dt.getMonth()] + " " + dt.getDate();
-      $(".hi", node).textContent = deg(s.hi);
-      $(".lo", node).textContent = deg(s.lo);
-      $(".cond", node).textContent = s.cond || "";
-      const humEl = $(".hum", node), windEl = $(".wind", node);
-      if (s.hum == null) { humEl.textContent = "—"; humEl.classList.add("na"); }
-      else humEl.textContent = s.hum + "%";
-      if (s.wind == null) { windEl.textContent = "—"; windEl.classList.add("na"); }
-      else windEl.textContent = s.wind + " mph" + (s.wdir ? " " + s.wdir : "");
+    $(".eyebrow-tag", node).textContent = "Your event · " + windowText;
+    $(".dow", node).textContent = DOW[dt.getDay()];
+    $(".date", node).textContent = MON[dt.getMonth()] + " " + dt.getDate();
+    $(".where", node).textContent = data.place.name;
+    $(".hi", node).textContent = deg(s.hi);
+    $(".lo", node).textContent = deg(s.lo);
+    $(".cond", node).textContent = s.cond || "";
+    const humEl = $(".hum", node), windEl = $(".wind", node);
+    humEl.textContent = s.hum == null ? "—" : s.hum + "%";
+    humEl.classList.toggle("na", s.hum == null);
+    windEl.textContent = s.wind == null ? "—" : speed(s.wind) + (s.wdir ? " " + s.wdir : "");
+    windEl.classList.toggle("na", s.wind == null);
 
-      const popEl = $(".pop-num", node);
-      if (s.pop == null) {
-        popEl.textContent = "No forecast yet";
-        popEl.classList.add("na");
-        $(".pop-label", node).textContent = "";
-      } else {
-        popEl.textContent = s.pop + "%";
-      }
-      const band = $(".band", node), fill = $(".fill", node), tick = $(".tick", node);
-      if (s.pop != null) {
-        band.style.left = (s.pop_min || 0) + "%";
-        band.style.width = Math.max(0, (s.pop_max || 0) - (s.pop_min || 0)) + "%";
-        tick.style.left = s.pop + "%";
-        requestAnimationFrame(() => { fill.style.width = s.pop + "%"; });
-      } else {
-        tick.style.display = "none";
-      }
-      const meta = $(".meta", node);
-      if (s.pop != null) {
-        const weighted = s.pop_plain != null && s.weights && Object.keys(s.weights).length > 1;
-        meta.innerHTML = (weighted ? "Skill-weighted across <b>" : "Average of <b>") + s.pop_n + " source" + (s.pop_n === 1 ? "" : "s") + "</b>" +
-          (weighted && s.pop_plain !== s.pop ? " (plain average <b>" + s.pop_plain + "%</b>)" : "") +
-          (s.pop_n > 1 ? " · they range from <b>" + s.pop_min + "%</b> to <b>" + s.pop_max + "%</b>" : "") +
-          " · tap for hourly";
-      } else {
-        meta.textContent = "Forecasts reach this far out only from some sources — check back later.";
-      }
-
-      // how much, not just how likely
-      const amtLine = $(".amt-line", node);
-      if (s.amt != null) {
-        amtLine.hidden = false;
-        const parts = [isTrace(s.amt)
-          ? "Rainfall <b>a trace at most</b>"
-          : "Rainfall <b>" + inches(s.amt) + "</b> expected"];
-        if (s.amt_max != null && !isTrace(s.amt_max) && s.amt_max > s.amt)
-          parts.push("wettest source <b>" + inches(s.amt_max) + "</b>");
-        if (s.amt_p90 != null && !isTrace(s.amt_p90))
-          parts.push("1-in-10 wet case <b>" + inches(s.amt_p90) + "</b>");
-        amtLine.innerHTML = parts.join(" · ") + " · across <b>" + s.amt_n + "</b> source" + (s.amt_n === 1 ? "" : "s");
-      }
-
-      // ceremony verdict
-      if (isKey) {
-        const win = s.hourly.filter(h => h.h >= KEY_WINDOW.from && h.h <= KEY_WINDOW.to && h.pop != null);
-        const lead = s.hourly.filter(h => h.h >= 14 && h.h <= KEY_WINDOW.to && h.pop != null);
-        const hourlyBasis = win.length > 0;
-        const f = hourlyBasis
-          ? { rain: Math.max(...lead.map(h => h.pop)), wind: avgOf(win, "wind") ?? s.wind, hum: avgOf(win, "hum") ?? s.hum, temp: avgOf(win, "temp") ?? s.hi }
-          : { rain: s.pop, wind: s.wind, hum: s.hum, temp: s.hi };
-        const g = { rain: grade(f.rain, RULES.rain), wind: grade(f.wind, RULES.wind), hum: grade(f.hum, RULES.hum), temp: gradeTemp(f.temp) };
-        // An easterly comes straight up the Navesink at the lawn — gustier and cooler than the town number.
-        const onshore = /^E|^NE|^SE/.test(s.wdir || "");
-        if (onshore && g.wind === "good") g.wind = "watch";
-        const names = { rain: "rain", wind: "wind", hum: "humidity", temp: "temperature" };
-        const concerns = Object.keys(g).filter(k => g[k] === "concern").map(k => names[k]);
-        const watches = Object.keys(g).filter(k => g[k] === "watch").map(k => names[k]);
-        const known = Object.values(g).filter(Boolean).length;
-        let text;
-        if (!known) text = "No forecast for the ceremony window yet";
-        else if (concerns.length) text = "Concern: " + concerns.join(", ");
-        else if (watches.length) text = "Good — keep an eye on " + watches.join(" and ") + (onshore && watches.includes("wind") ? " (onshore)" : "");
-        else text = "Ideal so far";
-        const v = $(".verdict", node);
-        v.hidden = false;
-        $(".verdict-label", v).textContent = "Ceremony · 4:30–6:30pm";
-        $(".verdict-text", v).textContent = text;
-        const ul = $(".factors", v);
-        [["rain", f.rain == null ? null : f.rain + "%", "rain"],
-         ["wind", f.wind == null ? null : f.wind + " mph" + (s.wdir ? " " + s.wdir : ""), "wind"],
-         ["hum", f.hum == null ? null : f.hum + "%", "humidity"],
-         ["temp", f.temp == null ? null : f.temp + "°", "temp"]].forEach(([k, val, label]) => {
-          if (val == null) return;
-          const li = document.createElement("li");
-          li.className = g[k];
-          li.innerHTML = label + " <b>" + val + "</b>";
-          ul.appendChild(li);
-        });
-        const winAmt = win.filter(h => h.amt != null);
-        if (winAmt.length) {
-          const total = winAmt.reduce((a, h) => a + h.amt, 0);
-          const el = document.createElement("p");
-          el.className = "sun";
-          el.innerHTML = isTrace(total)
-            ? "Expected rainfall in the window: <b>none</b> — the chance above is of a passing shower, not accumulation."
-            : "Expected rainfall in the window: <b>" + inches(total) + "</b>.";
-          v.appendChild(el);
-        }
-        if (s.sun && s.sun.sunset) {
-          const sunEl = $(".sun", v);
-          sunEl.hidden = false;
-          sunEl.innerHTML = "Sunset <b>" + fmtClock(s.sun.sunset) + "</b> · golden hour <b>" +
-            fmtClock(s.sun.golden_start) + "–" + fmtClock(s.sun.sunset) + "</b> — starts as cocktail hour winds down, the window for river portraits.";
-          v.appendChild(sunEl);
-        }
-        if (known) {
-          const basis = document.createElement("p");
-          basis.className = "basis";
-          basis.textContent = hourlyBasis
-            ? "Rain is the peak chance from 2pm through the ceremony; wind, humidity and temperature are the 4–6pm average. Wind limits are tightened for the riverside lawn, and an easterly off the bay counts as a watch."
-            : "Based on the day's averages until hourly forecasts reach this date.";
-          v.appendChild(basis);
-        }
-      }
-
-      // hourly
-      const hours = $(".hours", node);
-      s.hourly.forEach(h => {
-        const b = document.createElement("div");
-        const inWindow = isKey && h.h >= KEY_WINDOW.from && h.h <= KEY_WINDOW.to;
-        b.className = "h" + (h.pop == null ? " na" : "") + ((h.h < 6 || h.h >= 21) ? " night" : "") + (inWindow ? " gold" : "");
-        b.style.height = h.pop == null ? "2px" : Math.max(2, h.pop) + "%";
-        b.title = hourLabel(h.h) + ": " + (h.pop == null ? "no hourly data" : h.pop + "% · " + h.n + " src" + (h.temp != null ? " · " + h.temp + "°" : "") + (h.hum != null ? " · " + h.hum + "% hum" : "") + (h.wind != null ? " · " + h.wind + " mph" : "") + (h.amt != null ? " · " + inches(h.amt) + "/h" : ""));
-        const nearWindow = isKey && h.h >= KEY_WINDOW.from - 1 && h.h <= KEY_WINDOW.to + 1;
-        if (h.pop != null && (inWindow || (h.h % 3 === 0 && !nearWindow))) {
-          const l = document.createElement("span");
-          l.className = "lbl"; l.textContent = h.pop + "%";
-          b.appendChild(l);
-        }
-        hours.appendChild(b);
-      });
-      // rainfall by the hour, on the same axis as the chance bars above
-      const amtRow = $(".amounts", node);
-      const anyAmt = s.hourly.some(h => h.amt != null);
-      if (anyAmt) {
-        amtRow.hidden = false;
-        s.hourly.forEach(h => {
-          const a = document.createElement("div");
-          const inWindow = isKey && h.h >= KEY_WINDOW.from && h.h <= KEY_WINDOW.to;
-          a.className = "a" + (h.amt > 0.02 ? " wet" : "") + (inWindow ? " gold" : "");
-          a.style.height = h.amt == null ? "0"
-            : Math.max(2, Math.min(100, (h.amt / amtCeiling) * 100)) + "%";
-          a.title = hourLabel(h.h) + ": " + (h.amt == null ? "no amount published" :
-            (isTrace(h.amt) ? "no rain" : inches(h.amt) + " in the hour") + " · " + h.amt_n + " src");
-          amtRow.appendChild(a);
-        });
-        const acap = $(".amt-cap", node);
-        acap.hidden = false;
-        acap.textContent = "Bars above: chance of rain. Below: how much — a full-height bar is " +
-          inches(amtCeiling) + " in the hour.";
-      } else {
-        amtRow.remove();
-      }
-      if (isKey && s.hourly_available) {
-        const cap = document.createElement("p");
-        cap.className = "window-cap";
-        cap.innerHTML = '<span class="swatch"></span>' + KEY_WINDOW.label;
-        $(".hour-axis", node).after(cap);
-      }
-      if (!s.hourly_available) {
-        const p = document.createElement("p");
-        p.className = "meta"; p.textContent = "No source has published hourly detail this far out yet.";
-        hours.replaceWith(p);
-        $(".hour-axis", node).remove();
-        const strip = $(".amounts", node); if (strip) strip.remove();
-        const acap = $(".amt-cap", node); if (acap) acap.remove();
-      }
-
-      // per-source
-      const ul = $(".per-source", node);
-      data.sources.forEach(src => {
-        const li = document.createElement("li");
-        const d = src.daily && src.daily[date];
-        const n = document.createElement("span"); n.className = "n";
-        const w = s.weights && s.weights[src.id];
-        n.innerHTML = src.name + (w != null && w !== 1 ? " <span class=\"w\" title=\"weight in the headline average\">×" + w + "</span>" : "") +
-          (src.note ? "<small>" + src.note + "</small>" : "");
-        if (src.ok && d && (d.hum != null || d.wind != null)) {
-          const vit = document.createElement("span"); vit.className = "vit";
-          vit.textContent = (d.hum != null ? d.hum + "% humidity" : "") + (d.hum != null && d.wind != null ? " · " : "") +
-            (d.wind != null ? d.wind + " mph" + (d.wdir ? " " + d.wdir : "") : "");
-          n.appendChild(vit);
-        }
-        if (src.ok && d && d.amt != null) {
-          const rain = document.createElement("span"); rain.className = "vit";
-          rain.textContent = (isTrace(d.amt) ? "no measurable rain" : inches(d.amt) + " of rain") +
-            (d.amt_p90 != null && !isTrace(d.amt_p90) ? " · wettest runs " + inches(d.amt_p90) : "");
-          n.appendChild(rain);
-        }
-        const t = document.createElement("span"); t.className = "t";
-        const p = document.createElement("span"); p.className = "p";
-        if (!src.ok) { li.className = "off"; t.textContent = ""; p.textContent = "unavailable"; p.className += " na"; }
-        else if (!d) { li.className = "off"; t.textContent = ""; p.textContent = "not this far out"; p.className += " na"; }
-        else {
-          t.textContent = d.hi != null ? deg(d.hi) + " / " + deg(d.lo) : "";
-          if (d.pop == null) { p.textContent = "no rain %"; p.className += " na"; }
-          else p.textContent = d.pop + "%";
-        }
-        li.append(n, t, p);
-        ul.appendChild(li);
-      });
-
-      // expand/collapse
-      const detail = $(".detail", node);
-      const toggle = (scroll) => {
-        const open = detail.hidden;
-        detail.hidden = !open;
-        node.setAttribute("aria-expanded", String(open));
-        if (open && scroll !== false) requestAnimationFrame(() => node.scrollIntoView({ block: "nearest", behavior: "smooth" }));
-      };
-      // The element id is "d2026-09-06" while the shareable hash is
-      // "#2026-09-06", so the browser's own anchor jump never fires — the
-      // day opened where it was and stayed off-screen on a phone. Noted
-      // here and scrolled to once, after every day has been appended.
-      node.id = "d" + date;
-      if (location.hash === "#" + date) { toggle(false); deepLinked = node; }
-      node.addEventListener("click", e => { if (!detail.contains(e.target)) toggle(); });
-      node.addEventListener("keydown", e => {
-        if ((e.key === "Enter" || e.key === " ") && !detail.contains(e.target)) { e.preventDefault(); toggle(); }
-      });
-      days.appendChild(node);
-    });
-    if (deepLinked) {
-      requestAnimationFrame(() => deepLinked.scrollIntoView({ block: "start" }));
+    // headline chance + band
+    const popEl = $(".pop-num", node);
+    const band = $(".band", node), fill = $(".fill", node), tick = $(".tick", node);
+    if (s.pop == null) {
+      popEl.textContent = "No forecast yet"; popEl.classList.add("na");
+      $(".pop-label", node).textContent = "";
+      tick.style.display = "none";
+    } else {
+      popEl.textContent = s.pop + "%";
+      band.style.left = (s.pop_min || 0) + "%";
+      band.style.width = Math.max(0, (s.pop_max || 0) - (s.pop_min || 0)) + "%";
+      tick.style.left = s.pop + "%";
+      requestAnimationFrame(() => { fill.style.width = s.pop + "%"; });
+    }
+    const meta = $(".meta", node);
+    if (s.pop != null) {
+      const weighted = s.pop_plain != null && s.weights && Object.keys(s.weights).length > 1;
+      meta.append(weighted ? "Skill-weighted across " : "Average of ",
+        bold(s.pop_n + " source" + (s.pop_n === 1 ? "" : "s")));
+      if (weighted && s.pop_plain !== s.pop) meta.append(" (plain average ", bold(s.pop_plain + "%"), ")");
+      if (s.pop_n > 1) meta.append(" · they range from ", bold(s.pop_min + "%"), " to ", bold(s.pop_max + "%"));
+    } else {
+      meta.textContent = "Only some sources reach this far out so far; check back later.";
     }
 
-    // sources list
-    const ul = $("#sources");
-    ul.innerHTML = "";
+    // how much, not just how likely
+    if (s.amt != null) {
+      const a = $(".amt-line", node);
+      a.hidden = false;
+      if (isTrace(s.amt)) a.append("Rainfall ", bold("a trace at most"));
+      else a.append("Rainfall ", bold(rain(s.amt)), " expected");
+      if (s.amt_max != null && !isTrace(s.amt_max) && s.amt_max > s.amt) a.append(" · wettest source ", bold(rain(s.amt_max)));
+      if (s.amt_p90 != null && !isTrace(s.amt_p90)) a.append(" · 1-in-10 wet case ", bold(rain(s.amt_p90)));
+      a.append(" · across ", bold(String(s.amt_n)), " source" + (s.amt_n === 1 ? "" : "s"));
+    }
+
+    // verdict for the event window
+    const vb = $(".verdict", node);
+    vb.classList.add(v.grade || "none");
+    $(".verdict-label", vb).textContent = "Event · " + windowText;
+    $(".verdict-text", vb).textContent = v.label;
+    const fmt = { rain: x => x + "%", wind: speed, hum: x => x + "%", temp: deg };
+    const label = { rain: "rain", wind: "wind", hum: "humidity", temp: "temp" };
+    v.checks.forEach(c => {
+      const li = el("li", c.grade);
+      li.append(label[c.key] + " ", bold(fmt[c.key](c.value)));
+      $(".factors", vb).appendChild(li);
+    });
+    if (v.window_amt != null) {
+      const p = el("p", "sun");
+      if (isTrace(v.window_amt)) p.append("Expected rainfall during the event: ", bold("none"), " (the chance above is of a passing shower, not a soaking).");
+      else p.append("Expected rainfall during the event: ", bold(rain(v.window_amt)), ".");
+      vb.appendChild(p);
+    }
+    if (data.sun && (data.sun.sunrise || data.sun.sunset)) {
+      const p = el("p", "sun");
+      p.append("Sunrise ", bold(fmtClock(data.sun.sunrise)), " · sunset ", bold(fmtClock(data.sun.sunset)));
+      vb.appendChild(p);
+    }
+    if (v.checks.length) {
+      vb.appendChild(el("p", "basis", v.basis === "hourly"
+        ? "Rain is the highest hourly chance during the event; wind, humidity and temperature are averages over those hours."
+        : "Based on the day's figures until hourly forecasts reach this date."));
+    }
+
+    // hourly chance bars, event hours in gold
+    const hours = $(".hours", node);
+    s.hourly.forEach(h => {
+      const inWindow = gold.has(h.h);
+      const nearWindow = inWindow || gold.has(h.h - 1) || gold.has(h.h + 1);
+      const b = el("div", "h" + (h.pop == null ? " na" : "") + ((h.h < 6 || h.h >= 21) ? " night" : "") + (inWindow ? " gold" : ""));
+      b.style.height = h.pop == null ? "2px" : Math.max(2, h.pop) + "%";
+      b.title = hourLabel(h.h) + ": " + (h.pop == null ? "no hourly data" : h.pop + "% · " + h.n + " src" +
+        (h.temp != null ? " · " + deg(h.temp) : "") + (h.hum != null ? " · " + h.hum + "% hum" : "") +
+        (h.wind != null ? " · " + speed(h.wind) : "") + (h.amt != null ? " · " + rain(h.amt) + "/h" : ""));
+      if (h.pop != null && (inWindow || (h.h % 3 === 0 && !nearWindow))) b.appendChild(el("span", "lbl", h.pop + "%"));
+      hours.appendChild(b);
+    });
+    // rainfall strip on the same axis, scaled to the data (a fixed ceiling
+    // draws sub-pixel bars on drizzle days); the caption states the scale
+    const amtRow = $(".amounts", node);
+    if (s.hourly.some(h => h.amt != null)) {
+      const ceiling = Math.max(0.01, ...s.hourly.map(h => h.amt || 0));
+      amtRow.hidden = false;
+      s.hourly.forEach(h => {
+        const a = el("div", "a" + (h.amt > 0.02 ? " wet" : "") + (gold.has(h.h) ? " gold" : ""));
+        a.style.height = h.amt == null ? "0" : Math.max(2, Math.min(100, (h.amt / ceiling) * 100)) + "%";
+        a.title = hourLabel(h.h) + ": " + (h.amt == null ? "no amount published" :
+          (isTrace(h.amt) ? "no rain" : rain(h.amt) + " in the hour") + " · " + h.amt_n + " src");
+        amtRow.appendChild(a);
+      });
+      const cap = $(".amt-cap", node);
+      cap.hidden = false;
+      cap.textContent = "Bars above: chance of rain. Below: how much; a full-height bar is " + rain(ceiling) + " in the hour.";
+    } else {
+      amtRow.remove();
+    }
+    if (s.hourly_available) {
+      const cap = el("p", "window-cap");
+      cap.append(el("span", "swatch"), "Your event, " + windowText);
+      $(".hour-axis", node).after(cap);
+    } else {
+      hours.replaceWith(el("p", "meta", "No source has published hourly detail this far out yet."));
+      $(".hour-axis", node).remove();
+      [".amounts", ".amt-cap"].forEach(sel => { const x = $(sel, node); if (x) x.remove(); });
+    }
+
+    // per source
+    const ul = $(".per-source", node);
     data.sources.forEach(src => {
-      const li = document.createElement("li");
-      if (!src.ok) li.className = "off";
-      // Built as nodes, not markup: every other field on this page goes
-      // through esc(), and this one line was the exception — src.url and
-      // src.name interpolated raw into innerHTML.
-      const a = document.createElement("a");
-      a.href = src.url || "#";
-      a.target = "_blank";
-      a.rel = "noopener";
-      a.textContent = src.name;
-      li.appendChild(a);
-      const small = document.createElement("small");
-      // coverage may be absent or malformed — a source can report ok with
-      // nothing in it. Read the end of the range defensively rather than
-      // letting one blank source throw out of render() and blank the page.
-      const through = coverageEnd(src.coverage);
-      if (!src.ok) small.textContent = "unavailable on last check";
-      else if (through) small.textContent = "through " + fmtDay(through);
-      if (small.textContent) li.appendChild(small);
+      const d = src.daily && src.daily[date];
+      const li = el("li");
+      const n = el("span", "n", src.name);
+      const wt = s.weights && s.weights[src.id];
+      if (wt != null && wt !== 1) { const x = el("span", "w", "×" + wt); x.title = "weight in the headline average"; n.appendChild(x); }
+      if (src.note) n.appendChild(el("small", null, src.note));
+      if (src.ok && d && (d.hum != null || d.wind != null)) {
+        n.appendChild(el("span", "vit", [d.hum != null ? d.hum + "% humidity" : "",
+          d.wind != null ? speed(d.wind) + (d.wdir ? " " + d.wdir : "") : ""].filter(Boolean).join(" · ")));
+      }
+      if (src.ok && d && d.amt != null) {
+        n.appendChild(el("span", "vit", (isTrace(d.amt) ? "no measurable rain" : rain(d.amt) + " of rain") +
+          (d.amt_p90 != null && !isTrace(d.amt_p90) ? " · wettest runs " + rain(d.amt_p90) : "")));
+      }
+      const t = el("span", "t"), p = el("span", "p");
+      if (src.status === "not_here") { li.className = "off"; p.textContent = "not available here"; p.className += " na"; }
+      else if (!src.ok) { li.className = "off"; p.textContent = "unavailable"; p.className += " na"; }
+      else if (!d) {
+        li.className = "off"; p.className += " na";
+        p.textContent = src.covers_from ? "covers this date from " + fmtDay(src.covers_from) : "not this far out";
+      } else {
+        t.textContent = d.hi != null ? deg(d.hi) + " / " + deg(d.lo) : "";
+        if (d.pop == null) { p.textContent = "no rain %"; p.className += " na"; } else p.textContent = d.pop + "%";
+      }
+      li.append(n, t, p);
       ul.appendChild(li);
     });
 
-    $("#status").textContent = "Updated " + fmtTime(data.generated_at) + " · " + okCount + " of " + data.sources.length + " sources reporting";
-    $("#generated").textContent = "Forecasts refresh hourly. Chance of rain is each source's daytime figure; temperatures are the average high and low.";
+    $("#result").appendChild(node);
+    renderSources(data.sources);
+    const okCount = data.sources.filter(x => x.ok).length;
+    setStatus("Updated " + fmtTime(data.generated_at) + " · " + okCount + " of " + data.sources.length +
+      " sources reporting · times are local to " + data.place.tz.replace(/_/g, " "));
   }
 
-  fetch("data/latest.json?t=" + Math.floor(Date.now() / 300000), { cache: "no-cache" })
-    .then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
-    .then(data => { try { render(data); } catch (e) { throw new Error("render failed: " + e.message); } })
-    .catch(err => {
-      const st = $("#status");
-      st.textContent = "Couldn't load the forecast data (" + err.message + "). Try again in a minute.";
-      st.classList.add("err");
+  function renderSources(sources) {
+    const ul = $("#sources");
+    ul.innerHTML = "";
+    sources.forEach(src => {
+      const li = el("li", src.ok ? "" : "off");
+      const a = el("a", null, src.name);
+      a.href = src.url || "#"; a.target = "_blank"; a.rel = "noopener";
+      li.appendChild(a);
+      const note = src.status === "not_here" ? "not available here" : !src.ok ? "unavailable right now" : "";
+      if (note) li.appendChild(el("small", null, note));
+      ul.appendChild(li);
     });
+  }
+
+  fromUrl();
 })();
