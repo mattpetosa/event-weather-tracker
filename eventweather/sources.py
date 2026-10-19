@@ -16,7 +16,7 @@ import urllib.parse
 import urllib.request
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Callable
 
 BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -596,6 +596,21 @@ def land_cell(place, key, at):
     return (*_without_temps(daily, hourly), SEA_NOTE)
 
 
+def _real_local_times(raw, tz):
+    """Open-Meteo labels the whole series with ONE utc offset, the one in
+    force when it answers, so every hour after a DST change is an hour off.
+    Re-label each stamp through UTC into the place's real local time."""
+    off = raw.get("utc_offset_seconds")
+    times = (raw.get("hourly") or {}).get("time")
+    if off is None or not times:
+        return raw
+    shift = timedelta(seconds=off)
+    raw["hourly"]["time"] = [
+        (datetime.fromisoformat(t) - shift).replace(tzinfo=timezone.utc).astimezone(tz).strftime("%Y-%m-%dT%H:%M")
+        for t in times]
+    return raw
+
+
 def fetch_openmeteo(model):
     def fetch(place, ctx):
         def at(lat, lon):
@@ -604,7 +619,7 @@ def fetch_openmeteo(model):
                 "daily": OM_DAILY, "hourly": OM_HOURLY, "forecast_days": 16,
                 "timezone": place.tz, "temperature_unit": "fahrenheit",
                 "wind_speed_unit": "mph", "models": model})
-            raw = ctx.json("https://api.open-meteo.com/v1/forecast?" + q)
+            raw = _real_local_times(ctx.json("https://api.open-meteo.com/v1/forecast?" + q), place.zone)
             daily, hourly = parse_openmeteo(raw)
             return daily, hourly, raw.get("elevation")
         return land_cell(place, ("forecast", model), at)
@@ -618,7 +633,7 @@ def fetch_ensemble(model):
                 "latitude": f"{lat:.4f}", "longitude": f"{lon:.4f}",
                 "hourly": ENS_HOURLY, "forecast_days": 16, "timezone": place.tz,
                 "temperature_unit": "fahrenheit", "wind_speed_unit": "mph", "models": model})
-            raw = ctx.json("https://ensemble-api.open-meteo.com/v1/ensemble?" + q)
+            raw = _real_local_times(ctx.json("https://ensemble-api.open-meteo.com/v1/ensemble?" + q), place.zone)
             daily, hourly = parse_ensemble(raw)
             return daily, hourly, raw.get("elevation")
         return land_cell(place, ("ensemble", model), at)

@@ -132,3 +132,41 @@ def test_links_are_built_for_the_place():
     assert by_id["twc"].link(NJ_PLACE) == "https://weather.com/weather/tenday/l/40.347,-74.064"
     assert by_id["nws"].link(NJ_PLACE) == "https://forecast.weather.gov/MapClick.php?lat=40.3470&lon=-74.0640"
     assert by_id["metno"].link(NJ_PLACE) == "https://www.yr.no/"
+
+
+def _fixed_offset_payload(stamp_pop, days=("2026-10-31", "2026-11-01", "2026-11-02")):
+    """Open-Meteo labels a whole 16-day series with ONE utc offset (the one
+    in force now), so after a DST change its local stamps are an hour off."""
+    times = [f"{d}T{h:02d}:00" for d in days for h in range(24)]
+    n = len(times)
+    temps = [55 + 10 * (1 - abs(h - 14) / 14) for _ in days for h in range(24)]
+    return {"elevation": 5.0, "utc_offset_seconds": -14400,
+            "daily": {"time": list(days), "temperature_2m_max": [65] * 3, "temperature_2m_min": [55] * 3,
+                      "precipitation_probability_max": [0] * 3},
+            "hourly": {"time": times, "temperature_2m": temps,
+                       "precipitation_probability": [stamp_pop.get(t, 0) for t in times],
+                       "precipitation": [0.0] * n},
+            }
+
+
+def test_openmeteo_hours_follow_the_real_dst_change():
+    nyc = Place("New York", 40.71, -74.01, "America/New_York", "US")
+    # "12:00" at the fixed -4h offset is 16:00 UTC = 11:00 EST once clocks fall back
+    c = ctx({"api.open-meteo.com/v1/forecast": _fixed_offset_payload({"2026-11-02T12:00": 77,
+                                                                      "2026-10-31T12:00": 66})})
+    _, hourly, _ = s.fetch_openmeteo("gfs_seamless")(nyc, c)
+    assert hourly["2026-11-02"][11]["pop"] == 77 and hourly["2026-11-02"][12]["pop"] != 77
+    assert hourly["2026-10-31"][12]["pop"] == 66, "before the change nothing moves"
+
+
+def test_ensemble_hours_follow_the_real_dst_change():
+    nyc = Place("New York", 40.71, -74.01, "America/New_York", "US")
+    p = _fixed_offset_payload({})
+    n = len(p["hourly"]["time"])
+    p["hourly"]["temperature_2m_member01"] = p["hourly"].pop("temperature_2m")
+    p["hourly"]["precipitation_member01"] = [1.0 if t == "2026-11-02T12:00" else 0.0 for t in p["hourly"]["time"]]
+    del p["hourly"]["precipitation_probability"], p["hourly"]["precipitation"]
+    assert len(p["hourly"]["precipitation_member01"]) == n
+    c = ctx({"ensemble-api.open-meteo.com": p})
+    _, hourly, _ = s.fetch_ensemble("gfs_seamless")(nyc, c)
+    assert hourly["2026-11-02"][11]["pop"] == 100 and hourly["2026-11-02"][12]["pop"] == 0
