@@ -7,6 +7,8 @@ hours gold, and gives a verdict for just those hours: **Looks good**, **Keep an 
 
 It's a small Python server with no required dependencies, made for hosting your own copy.
 
+<p align="center"><img src="docs/screenshot.png" width="320" alt="The page on a phone: a London forecast with the event hours in gold and the verdict"></p>
+
 ## Run it
 
 **Plain Python** (3.11 or newer):
