@@ -1,46 +1,124 @@
-# Wedding Weather Tracker
+# Event Weather Tracker
 
-Multi-source rain outlook for one weekend, built for phones, live at https://weather.mhpwebserver.com. Pulls weather.com, Foreca, NWS, ECMWF/GFS/GEM and the ECMWF+GEFS+ICON ensembles hourly, averages them with skill-based weights, and shows a ceremony-window verdict for the key day. Fork it: change `LOCATION`, `EVENT_DAYS`, `KEY_DAY` and `KEY_WINDOW` for your own event.
+Will the weather hold for your event? Pick a place, a date and the hours that matter. The page
+asks every major forecast for that day, combines them with skill-based weights, colours your event's
+hours gold, and gives a verdict for just those hours: **Looks good**, **Keep an eye on: wind**, or
+**Concern: rain**. Send the link to guests; it opens straight to the answer.
 
-Consensus rain outlook for one weekend, built for phones. Every hour `collect.py`
-pulls the Red Bank forecast from ten sources, averages the daily chance of rain
-(and the hourly chance where a source publishes it), and writes `data/latest.json`.
-`www/` is a static page that reads that file. There is no backend.
+It's a small Python server with no required dependencies, made for hosting your own copy.
+
+## Run it
+
+**Plain Python** (3.11 or newer):
+
+    git clone https://github.com/mattpetosa/event-weather-tracker
+    cd event-weather-tracker
+    EWT_CONTACT="you@example.org" python3 -m eventweather
+
+Then open http://127.0.0.1:8080. On Windows, also run `pip install tzdata` if Python can't find
+time zones.
+
+**Docker:**
+
+    docker compose up -d
+
+Edit `compose.yaml` first to set `EWT_CONTACT`.
+
+**Behind nginx with systemd:** see `deploy/event-weather-tracker.service` and
+`deploy/nginx.example.conf`. Set `EWT_TRUST_PROXY=1` when a proxy sits in front, so rate limits
+apply per visitor rather than to the proxy.
+
+## Settings
+
+All settings are environment variables.
+
+| Variable | Default | What it does |
+|---|---|---|
+| `EWT_HOST` | `127.0.0.1` (`0.0.0.0` in Docker) | Address to listen on |
+| `EWT_PORT` | `8080` | Port |
+| `EWT_CONTACT` | *(none)* | An email or URL for the User-Agent header. NWS and MET Norway ask every app to identify itself; set this. |
+| `EWT_ENABLE_TWC` | `0` | Turn on weather.com (also needs `TWC_API_KEY`) |
+| `TWC_API_KEY` | *(none)* | weather.com API key |
+| `EWT_ENABLE_FORECA` | `0` | Turn on Foreca (needs `pip install -r requirements-foreca.txt`, or build Docker with `WITH_FORECA=1`) |
+| `EWT_CACHE_TTL` | `3600` | Seconds to keep a place's forecasts |
+| `EWT_CACHE_SIZE` | `500` | Places kept in memory |
+| `EWT_SOURCE_TIMEOUT` | `20` | Seconds before a slow source is marked unavailable |
+| `EWT_RATE_LIMIT` | `30` | New (uncached) forecasts per visitor per hour |
+| `EWT_SEARCH_LIMIT` | `60` | Place searches per visitor per minute |
+| `EWT_TRUST_PROXY` | `0` | Read the visitor's address from `X-Forwarded-For` |
+| `EWT_RULES_FILE` | *(none)* | JSON file overriding the verdict thresholds (below) |
+
+### Verdict thresholds
+
+Rain is the highest hourly chance during the event. Wind, humidity and temperature are averages over
+the event's hours. Until hourly forecasts reach the date, the day's figures are used. Defaults:
+
+```json
+{
+  "rain": {"good": 20, "watch": 35},
+  "wind": {"good": 10, "watch": 15},
+  "hum":  {"good": 65, "watch": 75},
+  "temp": {"good": [65, 80], "watch": [55, 85]}
+}
+```
+
+Rain and humidity are %, wind is mph, temperature is °F. A value at or under `good` is good, at or
+under `watch` is worth watching, and anything above is a concern. For temperature, `good` and `watch`
+are ranges. Put only the values you want to change in your `EWT_RULES_FILE`.
 
 ## Sources
-| id | Source | How | Reach |
-|---|---|---|---|
-| twc | The Weather Channel (weather.com; same engine as Wunderground) | `api.weather.com` v3 with the public key embedded in wunderground.com | 15 days daily + hourly |
-| foreca | Foreca | daily JSON from `api.foreca.net`, fetched with `curl_cffi` (Chrome TLS fingerprint). Serves metric whatever unit params you send: °C, m/s, mm — convert on the way in | 13 days, **daily only** (the hourly endpoint 404s) |
-| ecmwf_ens / gefs / icon_ens | ECMWF ensemble (51 runs), GEFS ensemble (31 runs), ICON ensemble (40 runs) | Open-Meteo ensemble API; rain % = share of members with ≥0.254 mm over 6am–8pm (hourly: ≥0.05 mm/h, because 6-hourly blocks are spread evenly across hours past ~day 6); temps = member mean | 16 days (GEFS needs `gfs_seamless`; `gfs025` is None past 10 days) |
-| nws | National Weather Service | `api.weather.gov` gridpoints PHI | 7 days daily + hourly |
-| ecmwf / gfs / gem | ECMWF, GFS, GEM (no best_match blend — it resolves to GFS here and double-counted it; daily rain % is the daytime-window max, not the 24 h max) | Open-Meteo `models=` | 16 days (GEM temps 10 days; ECMWF queried at lon -74.15 because its cell at -74.06 is ocean) |
-| metno | MET Norway | `api.met.no` locationforecast | ~9 days, temperatures only |
 
-Each source also yields humidity, wind speed (mph) and direction: the source's own daily figure where it publishes one (TWC dayparts, NWS wind text, Foreca's daily fields), otherwise the 6am–8pm average of its hourly data (`fill_daily_from_hourly`). Tiles show the cross-source average; direction is the most common compass point.
+| Source | Default | Notes |
+|---|---|---|
+| ECMWF, GEFS and ICON ensembles | on | Open-Meteo ensemble API. Rain % = share of model runs with measurable daytime rain |
+| ECMWF, GFS, GEM | on | Open-Meteo forecast API |
+| National Weather Service | on | US places only; reaches about 7 days |
+| MET Norway (yr.no) | on | Temperatures only; publishes no rain chance |
+| weather.com | **off** | Unofficial endpoint; needs `EWT_ENABLE_TWC=1` and `TWC_API_KEY` |
+| Foreca | **off** | Unofficial endpoint, daily figures only; needs `EWT_ENABLE_FORECA=1` and `curl_cffi` |
 
-A source failing is recorded on its own entry (`ok: false`) and never blocks the run.
+**weather.com and Foreca use unofficial endpoints.** They aren't public APIs, can change or break
+without notice, and their terms may not allow this use. That's why they are off by default; turning
+them on is your call.
 
-## Run / test
-    .venv/bin/python -m pytest -q tests     # parsers against fixtures in tests/fixtures
-    .venv/bin/python collect.py             # live collection → data/latest.json (+ data/history/)
-    cd www && python3 -m http.server 8799   # local preview (www/data → ../data symlink)
+**Open-Meteo** is free for non-commercial use (see https://open-meteo.com/en/terms). An uncached
+forecast costs about six Open-Meteo calls, a few more for coastal places (see below), and each place
+is cached for an hour. Commercial hosts need an Open-Meteo plan.
 
-## Deploy (this box)
-    sudo cp deploy/weather.mhpwebserver.com.conf /etc/nginx/sites-available/ && sudo ln -s ../sites-available/weather.mhpwebserver.com.conf /etc/nginx/sites-enabled/
-    sudo cp deploy/weather-collect.{service,timer} /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable --now weather-collect.timer
-    sudo nginx -t && sudo systemctl reload nginx
+Forecasts reach about 16 days ahead. A later date shows when it comes into range.
 
-Hash links open a day expanded, e.g. `https://weather.mhpwebserver.com/#2026-09-06`.
+## How the number is made
 
-## Headline weighting
+- **Skill weights.** The headline is a weighted average: ECMWF ensemble ×2, GEFS ×1.5, NWS ×1.5
+  (×2 inside 3 days), weather.com ×1.5, ECMWF/GFS ×1, ICON ensemble ×1, GEM ×0.75, Foreca ×1 inside
+  a week and ×0.5 beyond. The page also shows the plain average and the lowest-to-highest range.
+- **No double counting.** Open-Meteo derives the deterministic ECMWF and GFS rain chance from those
+  models' own ensembles. For rain those two rows count ×0.25; their temperatures keep full weight.
+- **Daytime chance.** Each source's daily rain chance is its daytime (6am–8pm) figure, so rows are
+  comparable.
+- **Rain amounts.** Amounts sit beside chances: a 60% chance of 0.02" is a different afternoon from
+  60% of half an inch. Ensembles use the member mean, plus a 1-in-10 wet case.
+- **Coastal places.** A model's grid cell can be mostly water, which gives flat sea-surface
+  temperatures. When a row's temperatures are flat on every day, the server tries the neighbouring
+  cells and uses the nearest land one. If there is none, it keeps that row's rain and leaves out its
+  temperatures.
+- **Time zones.** All times are local to the event, using the time zone the place search returns.
 
-The tile headline is a **skill-weighted** mean, not a plain average (`source_weight()` in `collect.py`; the plain average is kept as `pop_plain`). Weights by lead time: ECMWF ensemble ×2, GEFS ×1.5, NWS ×1.5 (×2 inside 3 days), weather.com ×1.5, ECMWF/GFS ×1, ICON ensemble ×1, GEM ×0.75, Foreca ×1 inside a week and ×0.5 beyond. The ICON ensemble is deliberately held below ECMWF ENS and GEFS: a third ensemble should add a view, not tilt the headline wet on member count alone. The same weights apply to the hourly bars and the ceremony verdict. The min–max band is still the raw per-source range.
+## API
 
-Weights are **per field**. Open-Meteo has no probability to publish from a deterministic run, so it derives `precipitation_probability` from that model's own ensemble — which means the `ecmwf` row's rain chance restates `ecmwf_ens`, and `gfs`'s restates `gefs`. Counted as full votes, one model family carried ×3 of the rain headline. For rain (`field="pop"`) those two rows drop to ×0.25; for temperature, humidity, wind and condition they keep full weight, because those really are an independent deterministic run. `GEM` is not discounted — it has no ensemble row on the page to duplicate.
+- `GET /api/places?q=london` returns `{"results": [{"label", "lat", "lon", "tz", "country_code", "elevation"}]}`
+- `GET /api/forecast?name=&lat=&lon=&tz=&cc=&date=YYYY-MM-DD&from=HH:MM&to=HH:MM` returns the summary, the
+  verdict, the sunrise/sunset times and every source's figures for that day.
+  - The response has `status: "too_far"` with `available_from` when the date is beyond the horizon.
+  - The API returns 400 for bad input and 429 when rate-limited.
 
-## Rainfall amounts
+## Development
 
-Every source publishes an amount as well as a chance, and a 60% chance of 0.02" is a very different afternoon from 60% of half an inch. Amounts are stored in inches per hour (`amt` on each hourly entry, summed over `DAY_WINDOW` for the daily figure) and drawn as a strip hanging below the hourly chance bars, on a shared scale across the three days that the caption always states.
+    python3 -m venv .venv && .venv/bin/pip install pytest
+    .venv/bin/python -m pytest -q
 
-Sources differ in what they give: weather.com has a native hourly `qpf`; Open-Meteo carries `precipitation`; the ensembles use the **member mean** (the conventional QPF, and the only summary that adds up across hours) plus `amt_p90`, the 90th-percentile member day total — the wet tail. NWS publishes `quantitativePrecipitation` only on the raw gridpoint, in 6-hour blocks that reach ~3.5 days out, and met.no's blocks reach ~9; both are spread evenly across their hours, the same convention the ensembles already use once their data goes 6-hourly. Foreca publishes a daily `rain` total in mm, but no hourly breakdown.
+Tests run offline against captured responses in `tests/fixtures/`.
+
+## License
+
+MIT

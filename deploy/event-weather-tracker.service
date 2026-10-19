@@ -1,0 +1,23 @@
+# Example systemd unit. Copy the repo to /opt/event-weather-tracker, create
+# the user (useradd --system eventweather), set EWT_CONTACT, then:
+#   sudo cp deploy/event-weather-tracker.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now event-weather-tracker
+[Unit]
+Description=Event Weather Tracker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=eventweather
+WorkingDirectory=/opt/event-weather-tracker
+ExecStart=/usr/bin/python3 -m eventweather
+Environment=EWT_HOST=127.0.0.1 EWT_PORT=8080 EWT_TRUST_PROXY=1
+Environment=EWT_CONTACT=
+Restart=on-failure
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

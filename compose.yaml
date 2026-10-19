@@ -1,0 +1,15 @@
+services:
+  event-weather:
+    build:
+      context: .
+      args:
+        WITH_FORECA: "0"        # "1" to install curl_cffi for Foreca
+    ports:
+      - "8080:8080"
+    environment:
+      EWT_CONTACT: ""           # an email or URL NWS / MET Norway can reach you at
+      EWT_ENABLE_TWC: "0"
+      TWC_API_KEY: ""
+      EWT_ENABLE_FORECA: "0"
+      EWT_TRUST_PROXY: "0"      # "1" only behind a reverse proxy that sets X-Forwarded-For
+    restart: unless-stopped
