@@ -22,7 +22,7 @@ class ForecastService:
         self.cfg, self.sources, self.clock = cfg, list(sources), clock
         self.rules = sm.load_rules(cfg.rules_file)
         self._cache = OrderedDict()     # key -> (expires_at, generated_at, entries)
-        self._inflight = {}             # key -> threading.Event
+        self._inflight = {}             # key -> {"done": Event, "result": (generated, entries) | None}
         self._lock = threading.Lock()
 
     # -- public ---------------------------------------------------------------
@@ -55,7 +55,10 @@ class ForecastService:
     # -- cache ----------------------------------------------------------------
 
     def _key(self, place):
-        return place.cache_key() + (tuple(s.id for s in self.sources),)
+        # the zone and country change what is fetched (Open-Meteo's timezone=,
+        # every parser's local hours, whether NWS is asked), so they are part
+        # of the key: one odd link must not relabel the hours for everyone
+        return place.cache_key() + (place.tz, place.country_code, tuple(s.id for s in self.sources))
 
     def _load(self, place):
         key = self._key(place)
@@ -65,13 +68,15 @@ class ForecastService:
                 if hit and hit[0] > self.clock():
                     self._cache.move_to_end(key)
                     return hit[1], hit[2]
-                ev = self._inflight.get(key)
-                owner = ev is None
+                slot = self._inflight.get(key)
+                owner = slot is None
                 if owner:
-                    ev = self._inflight[key] = threading.Event()
+                    slot = self._inflight[key] = {"done": threading.Event(), "result": None}
             if not owner:
-                ev.wait()
-                continue        # the owner filled the cache (or failed: then we fetch)
+                slot["done"].wait()
+                if slot["result"] is not None:
+                    return slot["result"]   # share the owner's answer, even an all-failed one
+                continue                    # the owner raised: try ourselves
             try:
                 entries = self._fetch_all(place)
                 generated = datetime.fromtimestamp(self.clock(), timezone.utc).isoformat(timespec="seconds")
@@ -81,11 +86,12 @@ class ForecastService:
                         self._cache.move_to_end(key)
                         while len(self._cache) > self.cfg.cache_size:
                             self._cache.popitem(last=False)
+                slot["result"] = (generated, entries)
                 return generated, entries
             finally:
                 with self._lock:
                     self._inflight.pop(key, None)
-                ev.set()
+                slot["done"].set()
 
     # -- fetching -------------------------------------------------------------
 

@@ -80,7 +80,7 @@ def test_nearby_points_share_the_cache():
     calls = []
     svc = service([src("a", counting(DATES, calls))])
     svc.forecast(NYC, "2026-10-20", "12:00", "13:00")
-    svc.forecast(Place("Near", 40.712, -74.008, "America/New_York"), "2026-10-20", "12:00", "13:00")
+    svc.forecast(Place("Near", 40.712, -74.008, "America/New_York", "US"), "2026-10-20", "12:00", "13:00")
     assert len(calls) == 1
 
 
@@ -178,3 +178,35 @@ def test_note_from_the_fetcher_is_added_to_the_source_note():
         return d, h, "nearest land grid cell used"
     r = service([src("a", with_note)]).forecast(NYC, "2026-10-20", "12:00", "13:00")
     assert r["sources"][0]["note"] == "note · nearest land grid cell used"
+
+
+def test_cache_key_includes_the_zone_and_country():
+    """Same coordinates, different zone: a crafted link must not relabel
+    everyone else's hours (or skip NWS) for an hour."""
+    calls = []
+    svc = service([src("a", counting(DATES, calls))])
+    svc.forecast(Place("x", 40.71, -74.01, "Asia/Tokyo", "JP"), "2026-10-20", "12:00", "13:00")
+    svc.forecast(NYC, "2026-10-20", "12:00", "13:00")
+    svc.forecast(Place("x", 40.71, -74.01, "America/New_York", "FR"), "2026-10-20", "12:00", "13:00")
+    assert len(calls) == 3
+
+
+def test_waiters_share_a_failed_fetch_instead_of_queueing():
+    calls = []
+
+    def slow_boom(place, ctx):
+        calls.append(1)
+        time.sleep(0.3)
+        raise RuntimeError("down")
+    svc = service([src("a", slow_boom)])
+    results = []
+    threads = [threading.Thread(target=lambda: results.append(
+        svc.forecast(NYC, "2026-10-20", "12:00", "13:00"))) for _ in range(4)]
+    t0 = time.monotonic()
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(calls) == 1 and time.monotonic() - t0 < 1.0
+    assert all(r["sources"][0]["status"] == "unavailable" for r in results)
+    assert not svc.is_cached(NYC)
