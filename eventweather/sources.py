@@ -582,17 +582,20 @@ def land_cell(place, key, at):
         with _CELL_LOCK:
             _CELL_OFFSETS[full_key] = (0, 0)
         return daily, hourly, None
+    failed = False
     for off in NEIGHBOURS:
         try:
             d2, h2, _ = at(*_shift(place.lat, place.lon, *off))
         except Exception:  # noqa: BLE001 — a failed neighbour is just not the answer
+            failed = True
             continue
         if not looks_like_sea(h2):
             with _CELL_LOCK:
                 _CELL_OFFSETS[full_key] = off
             return d2, h2, LAND_NOTE
-    with _CELL_LOCK:
-        _CELL_OFFSETS[full_key] = None
+    if not failed:   # only remember "all water" when every neighbour answered
+        with _CELL_LOCK:
+            _CELL_OFFSETS[full_key] = None
     return (*_without_temps(daily, hourly), SEA_NOTE)
 
 

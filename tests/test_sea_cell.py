@@ -102,3 +102,19 @@ def test_ensembles_get_the_same_check():
     fake = ByCell({}, ens)
     _, _, note = s.fetch_ensemble("ecmwf_ifs025")(COAST, ctx(fake))
     assert note == s.SEA_NOTE
+
+
+def test_failed_neighbours_are_retried_next_time_not_pinned_as_sea():
+    """A 429 or timeout on the neighbours is not evidence of open water."""
+    class Flaky(ByCell):
+        def __call__(self, url, headers, timeout):
+            r = super().__call__(url, headers, timeout)
+            if self.calls[-1] != ("40.3470", "-74.0640"):
+                raise OSError("429 Too Many Requests")
+            return r
+    fake = Flaky({}, om_payload(2))
+    _, _, note = s.fetch_openmeteo("ecmwf_ifs025")(COAST, ctx(fake))
+    assert note == s.SEA_NOTE
+    fake.calls.clear()
+    s.fetch_openmeteo("ecmwf_ifs025")(COAST, ctx(fake))
+    assert len(fake.calls) == 5, "the neighbours are tried again"
