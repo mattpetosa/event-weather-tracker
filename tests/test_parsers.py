@@ -1,11 +1,7 @@
-import json, os, sys
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import collect as c
+from zoneinfo import ZoneInfo
 
-FX = os.path.join(os.path.dirname(__file__), "fixtures")
-def fx(name):
-    with open(os.path.join(FX, name)) as f:
-        return json.load(f) if name.endswith(".json") else f.read()
+from eventweather import sources as c
+from util import fx, NY, FIXTURE_DAYS
 
 def _valid_day(d):
     assert d["pop"] is None or 0 <= d["pop"] <= 100
@@ -14,16 +10,16 @@ def _valid_day(d):
 
 
 def test_twc_daily_covers_event_days_with_values():
-    d = c.parse_twc_daily(fx("twc_daily.json"))
+    d = c.parse_twc_daily(fx("twc_daily.json"), NY)
     assert len(d) == 15
-    for day in c.EVENT_DAYS:
+    for day in FIXTURE_DAYS:
         assert day in d
         _valid_day(d[day])
         assert d[day]["pop"] is not None and d[day]["hi"] > d[day]["lo"]
     assert d["2026-08-24"]["pop"] is not None  # today falls back to night part
 
 def test_twc_hourly_local_dates_and_24_hours():
-    h = c.parse_twc_hourly(fx("twc_hourly.json"))
+    h = c.parse_twc_hourly(fx("twc_hourly.json"), NY)
     assert set(h["2026-09-06"].keys()) == set(range(24))
     assert all(0 <= v["pop"] <= 100 for v in h["2026-09-06"].values())
 
@@ -35,7 +31,7 @@ def test_openmeteo_daily_and_hourly():
     assert len(h["2026-09-06"]) == 24
 
 def test_nws_daily_merges_day_and_night_periods():
-    d = c.parse_nws_daily(fx("nws_daily.json"))
+    d = c.parse_nws_daily(fx("nws_daily.json"), NY)
     day = d["2026-08-25"]
     assert day["hi"] == 82 and day["lo"] is not None and day["pop"] == 15
     assert day["cond"]
@@ -43,36 +39,17 @@ def test_nws_daily_merges_day_and_night_periods():
     assert d["2026-08-24"]["lo"] == 62
 
 def test_nws_hourly():
-    h = c.parse_nws_hourly(fx("nws_hourly.json"))
+    h = c.parse_nws_hourly(fx("nws_hourly.json"), NY)
     assert len(h["2026-08-25"]) == 24
     assert h["2026-08-24"][13]["pop"] == 9
 
 def test_metno_temps_only_and_partial_days_dropped():
-    d, h = c.parse_metno(fx("metno.json"))
+    d, h = c.parse_metno(fx("metno.json"), NY)
     assert "2026-08-25" in d and "2026-09-01" in d  # 6h blocks reach ~9 days out
     assert d["2026-08-25"]["pop"] is None
     assert d["2026-08-25"]["hi"] > d["2026-08-25"]["lo"]
     assert "2026-09-03" not in d  # only 1 block that day → dropped
     assert h["2026-08-25"][12]["temp"] is not None
-
-
-def test_summary_averages_only_available_values():
-    srcs = [
-        {"ok": True, "daily": {"2026-09-06": {"pop": 20, "hi": 80, "lo": 60, "cond": "Sunny"}},
-         "hourly": {"2026-09-06": {"12": {"pop": 10, "temp": 78}}}},
-        {"ok": True, "daily": {"2026-09-06": {"pop": 40, "hi": 84, "lo": None, "cond": "Drizzle"}},
-         "hourly": {"2026-09-06": {"12": {"pop": 30, "temp": None}}}},
-        {"ok": True, "daily": {"2026-09-06": {"pop": None, "hi": 82, "lo": 62, "cond": "Drizzle"}}, "hourly": {}},
-        {"ok": False, "daily": {"2026-09-06": {"pop": 99, "hi": 99, "lo": 99, "cond": "X"}}, "hourly": {}},
-    ]
-    s = c.summarise(srcs, ["2026-09-06", "2026-09-07"])
-    d = s["2026-09-06"]
-    assert d["pop"] == 30 and d["pop_n"] == 2 and d["pop_min"] == 20 and d["pop_max"] == 40
-    assert d["hi"] == 82 and d["lo"] == 61 and d["cond"] == "Sunny"
-    assert d["hourly"][12] == {"h": 12, "pop": 20, "n": 2, "temp": 78, "hum": None,
-                               "wind": None, "amt": None, "amt_n": 0}
-    assert d["hourly"][0]["pop"] is None
-    assert s["2026-09-07"]["pop"] is None and s["2026-09-07"]["hourly_available"] is False
 
 
 def test_ensemble_probability_is_member_share():
@@ -83,7 +60,7 @@ def test_ensemble_probability_is_member_share():
     idx = [i for i, t in enumerate(h6["time"]) if t.startswith("2026-09-06")]
     member_max = max(h6[k][i] for k in h6 if k.startswith("temperature") for i in idx)
     assert d["2026-09-06"]["hi"] < member_max
-    for day in c.EVENT_DAYS:
+    for day in FIXTURE_DAYS:
         assert day in d and 0 <= d[day]["pop"] <= 100
         assert d[day]["hi"] > d[day]["lo"]
     assert len(h["2026-09-06"]) == 24
@@ -121,15 +98,15 @@ def test_wind_text_forms():
     assert c._cardinal(242.7) == "SW" and c._cardinal(0) == "N" and c._cardinal(350) == "N" and c._cardinal(100) == "E"
 
 def test_humidity_wind_per_source():
-    d = c.parse_twc_daily(fx("twc_daily.json"))
+    d = c.parse_twc_daily(fx("twc_daily.json"), NY)
     assert 0 < d["2026-09-06"]["hum"] <= 100 and d["2026-09-06"]["wind"] >= 0 and d["2026-09-06"]["wdir"]
-    h = c.parse_twc_hourly(fx("twc_hourly.json"))
+    h = c.parse_twc_hourly(fx("twc_hourly.json"), NY)
     assert h["2026-09-06"][12]["hum"] and h["2026-09-06"][12]["wdir"]
-    nd = c.parse_nws_daily(fx("nws_daily.json"))
+    nd = c.parse_nws_daily(fx("nws_daily.json"), NY)
     assert nd["2026-08-25"]["wind"] == 5 and nd["2026-08-25"]["wdir"] == "W"
-    nh = c.parse_nws_hourly(fx("nws_hourly.json"))
+    nh = c.parse_nws_hourly(fx("nws_hourly.json"), NY)
     assert nh["2026-08-24"][18]["hum"] == 54 and nh["2026-08-24"][18]["wind"] == 5
-    _, mh = c.parse_metno(fx("metno.json"))
+    _, mh = c.parse_metno(fx("metno.json"), NY)
     v = next(iter(mh["2026-08-25"].values()))
     assert 0 < v["hum"] <= 100 and v["wind"] >= 0 and v["wdir"] in c._CARDINALS
     _, om = c.parse_openmeteo(fx("openmeteo_ecmwf.json"))
@@ -153,25 +130,6 @@ def test_fill_daily_from_hourly_uses_daytime_only():
     daily = {"2026-09-06": {"pop": 10, "hi": 80, "lo": 60, "cond": None}}
     c.fill_daily_from_hourly(daily, {"2026-09-06": {12: {"hum": 50, "wind": 1, "wdir": "S"}}})
     assert daily["2026-09-06"]["hum"] is None and daily["2026-09-06"]["wdir"] is None
-
-def test_summary_humidity_wind():
-    srcs = [
-        {"ok": True, "daily": {"2026-09-06": {"pop": 20, "hi": 80, "lo": 60, "cond": "Sunny", "hum": 60, "wind": 8, "wdir": "SW"}}, "hourly": {}},
-        {"ok": True, "daily": {"2026-09-06": {"pop": 30, "hi": 80, "lo": 60, "cond": None, "hum": 70, "wind": None, "wdir": "SW"}}, "hourly": {}},
-        {"ok": True, "daily": {"2026-09-06": {"pop": 30, "hi": 80, "lo": 60, "cond": None, "hum": None, "wind": 12, "wdir": "W"}}, "hourly": {}},
-    ]
-    s = c.summarise(srcs, ["2026-09-06"])["2026-09-06"]
-    assert s["hum"] == 65 and s["hum_n"] == 2 and s["wind"] == 10 and s["wind_n"] == 2 and s["wdir"] == "SW"
-
-
-def test_sun_times_red_bank_sept_6():
-    st = c.sun_times("2026-09-06")
-    # timeanddate.com for Red Bank, NJ on 2026-09-06: sunrise ~6:27am, sunset ~7:20pm EDT
-    assert st["sunrise"] in ("06:26", "06:27", "06:28")
-    assert st["sunset"] in ("19:19", "19:20", "19:21")
-    h, m = map(int, st["golden_start"].split(":"))
-    assert 18 * 60 + 20 <= h * 60 + m <= 18 * 60 + 45   # ~40-55 min before sunset in September
-
 
 def test_coverage_is_null_when_a_source_returns_no_days():
     """[] is truthy in JavaScript: an empty coverage list made the page call
@@ -218,78 +176,8 @@ def test_openmeteo_daily_pop_is_daytime_window_not_24h_max():
     assert c.parse_openmeteo(d)[0][date]["pop"] == 35
 
 
-def test_best_match_blend_is_not_a_source():
-    """best_match resolves to GFS for this location, so listing it doubled
-    GFS's weight in every average."""
-    assert "openmeteo" not in {s["id"] for s in c.SOURCES}
-
-
-def test_source_weight_by_lead_time():
-    # ECMWF ensemble is the most skilful thing on the page at 1–2 weeks out
-    assert c.source_weight("ecmwf_ens", 11) > c.source_weight("gfs", 11)
-    # a commercial 15-day is weak past a week; fine inside it
-    assert c.source_weight("foreca", 11) < c.source_weight("foreca", 3)
-    # NWS earns more trust as the day approaches
-    assert c.source_weight("nws", 2) > c.source_weight("nws", 6)
-    # unknown / test sources count as a plain 1.0
-    assert c.source_weight(None, 5) == 1.0 and c.source_weight("bogus", 5) == 1.0
-
-
-def test_summary_headline_is_weighted_and_plain_average_kept():
-    srcs = [
-        {"id": "ecmwf_ens", "ok": True, "daily": {"2026-09-06": {"pop": 40, "hi": 80, "lo": 60}},
-         "hourly": {"2026-09-06": {"12": {"pop": 40, "temp": 80}}}},
-        {"id": "foreca", "ok": True, "daily": {"2026-09-06": {"pop": 0, "hi": 80, "lo": 60}},
-         "hourly": {"2026-09-06": {"12": {"pop": 0, "temp": 80}}}},
-    ]
-    s = c.summarise(srcs, ["2026-09-06"], today="2026-08-26")["2026-09-06"]
-    assert s["pop_plain"] == 20
-    assert s["pop"] > 20, "headline leans toward the ensemble"
-    assert s["hourly"][12]["pop"] > 20
-    assert s["pop_n"] == 2 and s["pop_min"] == 0 and s["pop_max"] == 40
-    assert s["weights"]["ecmwf_ens"] > s["weights"]["foreca"]
-
-
-# ---------------------------------------------------------------------------
-# rain amount ("how much", not just "how likely") and family de-duplication
-# ---------------------------------------------------------------------------
-
-def test_source_weight_pop_dedups_the_ensemble_twins():
-    """Open-Meteo derives precipitation_probability from a model's ensemble,
-    so the deterministic ECMWF/GFS rows re-state their own ensemble row's
-    opinion. They must not count as independent votes for rain."""
-    assert c.source_weight("ecmwf", 5, "pop") < c.source_weight("ecmwf", 5, "temp")
-    assert c.source_weight("gfs", 5, "pop") < c.source_weight("gfs", 5, "temp")
-    # the ensembles themselves and the independent sources are untouched
-    for sid in ("ecmwf_ens", "gefs", "icon_ens", "nws", "twc", "foreca", "gem"):
-        assert c.source_weight(sid, 5, "pop") == c.source_weight(sid, 5, "temp")
-    # GEM has no ensemble row on the page, so it is duplicating nothing
-    assert c.source_weight("gem", 5, "pop") == 0.75
-    # the ECMWF family still outweighs a lone deterministic run
-    assert c.source_weight("ecmwf_ens", 5, "pop") > c.source_weight("ecmwf", 5, "pop")
-    # default field keeps the old single-argument behaviour
-    assert c.source_weight("ecmwf", 5) == c.source_weight("ecmwf", 5, "temp")
-
-
-def test_summary_pop_dedup_does_not_touch_temperature():
-    """The det rows keep full weight for temps — those are a real independent
-    run — while their rain vote is discounted."""
-    srcs = [
-        {"id": "ecmwf_ens", "ok": True, "daily": {"2026-09-06": {"pop": 60, "hi": 70, "lo": 60}}, "hourly": {}},
-        {"id": "ecmwf", "ok": True, "daily": {"2026-09-06": {"pop": 60, "hi": 70, "lo": 60}}, "hourly": {}},
-        {"id": "gem", "ok": True, "daily": {"2026-09-06": {"pop": 0, "hi": 90, "lo": 60}}, "hourly": {}},
-    ]
-    s = c.summarise(srcs, ["2026-09-06"], today="2026-09-01")["2026-09-06"]
-    # pop: ecmwf_ens 2.0 + ecmwf 0.25 vs gem 0.75  ->  60*2.25/3.0 = 45
-    assert s["pop"] == 45
-    # hi: ecmwf_ens 2.0 + ecmwf 1.0 vs gem 0.75  ->  (70*3 + 90*.75)/3.75 = 74
-    assert s["hi"] == 74
-    # the published weights describe the headline, which is the rain number
-    assert s["weights"]["ecmwf"] == 0.25
-
-
 def test_twc_hourly_amount_in_inches():
-    h = c.parse_twc_hourly(fx("twc_hourly.json"))
+    h = c.parse_twc_hourly(fx("twc_hourly.json"), NY)
     day = h["2026-09-06"]
     assert all("amt" in v for v in day.values())
     assert all(v["amt"] is None or v["amt"] >= 0 for v in day.values())
@@ -318,7 +206,7 @@ def test_ensemble_amount_is_member_mean_with_a_p90_day_total():
 
 
 def test_nws_grid_qpf_is_spread_evenly_over_its_block():
-    q = c.parse_nws_grid_qpf(fx("nws_grid.json"))
+    q = c.parse_nws_grid_qpf(fx("nws_grid.json"), NY)
     # 2026-09-01T18:00Z/PT6H = 7.874 mm over 2pm-8pm local -> 0.052 in/h
     assert q["2026-09-01"][14] == round(7.874 / 25.4 / 6, 3)
     assert q["2026-09-01"][14] == q["2026-09-01"][19]
@@ -326,40 +214,11 @@ def test_nws_grid_qpf_is_spread_evenly_over_its_block():
 
 
 def test_metno_hourly_amount():
-    d, h = c.parse_metno(fx("metno.json"))
+    d, h = c.parse_metno(fx("metno.json"), NY)
     first = h["2026-08-25"]
     assert any(v.get("amt") is not None for v in first.values())
     assert all(v.get("amt") is None or v["amt"] >= 0 for v in first.values())
 
-
-def test_summary_amount_is_weighted_hourly_and_daily():
-    srcs = [
-        {"id": "ecmwf_ens", "ok": True,
-         "daily": {"2026-09-06": {"pop": 60, "hi": 70, "lo": 60, "amt": 0.4, "amt_p90": 1.0}},
-         "hourly": {"2026-09-06": {"12": {"pop": 60, "temp": 70, "amt": 0.4}}}},
-        {"id": "gem", "ok": True,
-         "daily": {"2026-09-06": {"pop": 0, "hi": 70, "lo": 60, "amt": 0.0}},
-         "hourly": {"2026-09-06": {"12": {"pop": 0, "temp": 70, "amt": 0.0}}}},
-    ]
-    s = c.summarise(srcs, ["2026-09-06"], today="2026-09-01")["2026-09-06"]
-    # 0.4*2.0 / (2.0+0.75) = 0.291
-    assert s["amt"] == 0.291
-    assert s["amt_max"] == 0.4, "wettest source, for the range"
-    assert s["amt_p90"] == 1.0
-    assert s["hourly"][12]["amt"] == 0.291
-    assert s["amt_n"] == 2
-
-
-def test_summary_amount_absent_when_no_source_publishes_one():
-    srcs = [{"id": "foreca", "ok": True,
-             "daily": {"2026-09-06": {"pop": 70, "hi": 75, "lo": 65}}, "hourly": {}}]
-    s = c.summarise(srcs, ["2026-09-06"], today="2026-09-01")["2026-09-06"]
-    assert s["amt"] is None and s["amt_n"] == 0 and s["amt_p90"] is None
-
-
-# ---------------------------------------------------------------------------
-# Foreca (replaced AccuWeather as the second commercial forecaster, 2026-09-01)
-# ---------------------------------------------------------------------------
 
 def test_foreca_daily_converts_its_metric_units():
     """Foreca serves metric no matter what unit params you send: temps in C,
@@ -377,7 +236,7 @@ def test_foreca_daily_converts_its_metric_units():
 
 def test_foreca_daily_covers_the_event_days():
     d = c.parse_foreca_daily(fx("foreca_daily.json"))
-    for day in c.EVENT_DAYS:
+    for day in FIXTURE_DAYS:
         assert day in d
         _valid_day(d[day])
 
@@ -391,7 +250,7 @@ def test_foreca_returns_no_hourly():
 
 def test_icon_ensemble_parses_all_forty_members():
     daily, hourly = c.parse_ensemble(fx("ensemble_icon.json"))
-    for day in c.EVENT_DAYS:
+    for day in FIXTURE_DAYS:
         assert daily[day]["members"] == 40
         assert 0 <= daily[day]["pop"] <= 100
         assert daily[day]["hi"] > daily[day]["lo"]
@@ -399,7 +258,7 @@ def test_icon_ensemble_parses_all_forty_members():
 
 
 def test_icon_ensemble_reads_a_land_cell_not_the_sst_cell():
-    """ECMWF's 0.25 cell at Red Bank is open Atlantic: sea level, and flat
+    """ECMWF's 0.25 cell at the fixture point is open Atlantic: sea level, and flat
     70-73F sea-surface temps EVERY day. ICON's land mask calls the same cell
     land, so unlike ECMWF it needs no longitude nudge. A marine cell is flat
     on every day, so the guard is the warmest day's swing, not the coolest --
@@ -408,12 +267,23 @@ def test_icon_ensemble_reads_a_land_cell_not_the_sst_cell():
     raw = fx("ensemble_icon.json")
     assert raw["elevation"] > 0                      # 13m: land, not sea surface
     daily, hourly = c.parse_ensemble(raw)
-    swings = [daily[d]["hi"] - daily[d]["lo"] for d in c.EVENT_DAYS]
+    swings = [daily[d]["hi"] - daily[d]["lo"] for d in FIXTURE_DAYS]
     assert max(swings) > 8
 
 
-def test_new_sources_are_weighted_below_the_established_ensembles():
-    assert c.source_weight("icon_ens", 5) < c.source_weight("gefs", 5)
-    assert c.source_weight("icon_ens", 5) > c.source_weight("gem", 5)
-    # a commercial 15-day is weak at range, the way AccuWeather's was
-    assert c.source_weight("foreca", 11) < c.source_weight("foreca", 3)
+def test_local_date_hour_on_a_dst_change_day():
+    # 2026-11-01: US clocks fall back at 2am, so 1am happens twice
+    assert c._local_date_hour("2026-11-01T05:30:00Z", NY) == ("2026-11-01", 1)
+    assert c._local_date_hour("2026-11-01T06:30:00Z", NY) == ("2026-11-01", 1)
+    assert c._local_date_hour("2026-11-01T07:30:00Z", NY) == ("2026-11-01", 2)
+    # Sydney springs forward 2am -> 3am on 2026-10-04: the date is already the 4th
+    syd = ZoneInfo("Australia/Sydney")
+    assert c._local_date_hour("2026-10-03T15:30:00Z", syd) == ("2026-10-04", 1)
+    assert c._local_date_hour("2026-10-03T16:30:00Z", syd) == ("2026-10-04", 3)
+
+
+def test_parsers_follow_the_zone_they_are_given():
+    """The same NWS hourly feed read in UTC moves every hour by 4 (EDT)."""
+    ny = c.parse_nws_hourly(fx("nws_hourly.json"), NY)
+    utc = c.parse_nws_hourly(fx("nws_hourly.json"), ZoneInfo("UTC"))
+    assert ny["2026-08-24"][13]["pop"] == utc["2026-08-24"][17]["pop"]

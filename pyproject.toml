@@ -1,0 +1,10 @@
+[project]
+name = "event-weather-tracker"
+version = "1.0.0"
+description = "Multi-source weather outlook for one event: pick a place, a date and the hours that matter."
+requires-python = ">=3.11"
+license = { text = "MIT" }
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
