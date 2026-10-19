@@ -170,3 +170,12 @@ def test_idle_connections_are_dropped():
         s.close()
     finally:
         httpd.shutdown()
+
+
+def test_rate_limits_group_ipv6_by_slash_64():
+    from eventweather.server import rate_key
+    assert rate_key("2001:db8:1:2:aaaa::1") == rate_key("2001:db8:1:2:bbbb:cccc:dddd:9")
+    assert rate_key("2001:db8:1:2::1") != rate_key("2001:db8:1:3::1")
+    assert rate_key("203.0.113.7") == "203.0.113.7"
+    assert rate_key("::ffff:203.0.113.7") == "203.0.113.7"
+    assert rate_key("not an ip") == "not an ip"

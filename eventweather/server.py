@@ -1,6 +1,7 @@
 """HTTP front door: the static page, place search and the forecast API."""
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import re
@@ -28,6 +29,20 @@ TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=u
 DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 PLACES_TTL = 86400
 PLACES_MAX = 1000
+
+
+def rate_key(ip):
+    """What a visitor is counted as: the address for IPv4, the /64 for IPv6
+    (one home or server gets a whole /64, so per-address limits are free)."""
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return ip
+    if addr.version == 6 and addr.ipv4_mapped:
+        return str(addr.ipv4_mapped)
+    if addr.version == 6:
+        return str(ipaddress.ip_network(f"{addr}/64", strict=False))
+    return str(addr)
 
 
 class BadRequest(Exception):
@@ -148,9 +163,9 @@ def make_handler(app):
             qs = parse_qs(parts.query)
             try:
                 if parts.path == "/api/places":
-                    self._json(*app.places(qs, app.client_ip(self)))
+                    self._json(*app.places(qs, rate_key(app.client_ip(self))))
                 elif parts.path == "/api/forecast":
-                    self._json(*app.forecast(qs, app.client_ip(self)))
+                    self._json(*app.forecast(qs, rate_key(app.client_ip(self))))
                 elif parts.path.startswith("/api/"):
                     self._json(404, {"error": "not found"}, {})
                 else:
