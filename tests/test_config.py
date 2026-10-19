@@ -7,7 +7,7 @@ def test_defaults():
     c = Config.from_env({})
     assert (c.host, c.port, c.cache_ttl, c.rate_limit, c.search_limit) == ("127.0.0.1", 8080, 3600, 30, 60)
     assert not c.enable_twc and not c.enable_foreca and not c.trust_proxy and c.contact is None
-    assert c.source_timeout == 20.0 and c.cache_size == 500
+    assert c.source_timeout == 20.0 and c.cache_size == 100   # ~1 MB per place
 
 
 def test_reads_every_variable():

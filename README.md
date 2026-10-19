@@ -41,7 +41,7 @@ All settings are environment variables.
 | `TWC_API_KEY` | *(none)* | weather.com API key |
 | `EWT_ENABLE_FORECA` | `0` | Turn on Foreca (needs `pip install -r requirements-foreca.txt`, or build Docker with `WITH_FORECA=1`) |
 | `EWT_CACHE_TTL` | `3600` | Seconds to keep a place's forecasts |
-| `EWT_CACHE_SIZE` | `500` | Places kept in memory |
+| `EWT_CACHE_SIZE` | `100` | Places kept in memory (about 1 MB each) |
 | `EWT_SOURCE_TIMEOUT` | `20` | Seconds before a slow source is marked unavailable |
 | `EWT_RATE_LIMIT` | `30` | New (uncached) forecasts per visitor per hour |
 | `EWT_SEARCH_LIMIT` | `60` | Place searches per visitor per minute |

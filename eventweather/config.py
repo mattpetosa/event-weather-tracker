@@ -43,7 +43,7 @@ class Config:
     twc_key: str | None = None
     enable_foreca: bool = False
     cache_ttl: int = 3600
-    cache_size: int = 500
+    cache_size: int = 100        # about 1 MB of forecasts per place
     source_timeout: float = 20.0
     rate_limit: int = 30
     search_limit: int = 60
@@ -61,7 +61,7 @@ class Config:
             twc_key=env.get("TWC_API_KEY") or None,
             enable_foreca=_bool(env, "EWT_ENABLE_FORECA"),
             cache_ttl=_num(env, "EWT_CACHE_TTL", 3600),
-            cache_size=_num(env, "EWT_CACHE_SIZE", 500, minimum=1),
+            cache_size=_num(env, "EWT_CACHE_SIZE", 100, minimum=1),
             source_timeout=_num(env, "EWT_SOURCE_TIMEOUT", 20.0, kind=float, minimum=1),
             rate_limit=_num(env, "EWT_RATE_LIMIT", 30),
             search_limit=_num(env, "EWT_SEARCH_LIMIT", 60),
