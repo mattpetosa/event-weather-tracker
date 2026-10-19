@@ -7,12 +7,17 @@ Temperatures are °F, wind mph, rain inches; dates and hours are the place's loc
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 import re
+import threading
+import urllib.error
 import urllib.parse
 import urllib.request
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Callable
 
 BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
@@ -455,3 +460,211 @@ def parse_ensemble(d):
                        "amt_p90": _inches(_percentile(day_totals, 0.9))}
     # daily amt is the sum of the hourly means over the daytime window
     return fill_daily_from_hourly(daily, hourly), hourly
+
+
+# ----------------------------------------------------------------------------
+# HTTP
+# ----------------------------------------------------------------------------
+
+class NotAvailableHere(Exception):
+    """The source does not cover this place (e.g. NWS outside the US)."""
+
+
+def http_get(url, headers, timeout):
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read().decode("utf-8", "replace")
+
+
+def http_json(url, headers, timeout):
+    return json.loads(http_get(url, headers, timeout))
+
+
+def cffi_json(url, timeout):
+    # Foreca fronts its JSON with a TLS-fingerprint check; curl_cffi's Chrome
+    # impersonation passes it, urllib does not.
+    from curl_cffi import requests as cffi_requests
+    r = cffi_requests.get(url, impersonate="chrome", timeout=timeout)
+    r.raise_for_status()
+    return r.json()
+
+
+def have_curl_cffi():
+    return importlib.util.find_spec("curl_cffi") is not None
+
+
+@dataclass
+class FetchContext:
+    user_agent: str
+    timeout: float = 20.0
+    twc_key: str | None = None
+    get_json: Callable | None = None          # (url, headers, timeout) -> obj; tests inject
+    get_browser_json: Callable | None = None  # (url, timeout) -> obj; tests inject
+
+    def json(self, url, headers=None):
+        return (self.get_json or http_json)(url, headers or {"User-Agent": self.user_agent}, self.timeout)
+
+    def browser_json(self, url):
+        return (self.get_browser_json or cffi_json)(url, self.timeout)
+
+
+# ----------------------------------------------------------------------------
+# fetchers: fetch(place, ctx) -> (daily, hourly) or (daily, hourly, note)
+# ----------------------------------------------------------------------------
+
+NWS_COUNTRIES = frozenset({"US", "PR", "GU", "VI", "AS", "MP"})
+OM_DAILY = "precipitation_probability_max,temperature_2m_max,temperature_2m_min,weather_code"
+OM_HOURLY = ("precipitation_probability,precipitation,temperature_2m,relative_humidity_2m,"
+             "wind_speed_10m,wind_direction_10m")
+ENS_HOURLY = "precipitation,temperature_2m,relative_humidity_2m,wind_speed_10m"
+
+
+def fetch_twc(place, ctx):
+    base = ("https://api.weather.com/v3/wx/forecast/{}?geocode={:.3f},{:.3f}"
+            "&format=json&units=e&language=en-US&apiKey={}")
+    hdr = {"User-Agent": BROWSER_UA}
+    d = ctx.json(base.format("daily/15day", place.lat, place.lon, ctx.twc_key), hdr)
+    h = ctx.json(base.format("hourly/15day", place.lat, place.lon, ctx.twc_key), hdr)
+    return parse_twc_daily(d, place.zone), parse_twc_hourly(h, place.zone)
+
+
+def fetch_openmeteo(model):
+    def fetch(place, ctx):
+        def at(lat, lon):
+            q = urllib.parse.urlencode({
+                "latitude": f"{lat:.4f}", "longitude": f"{lon:.4f}",
+                "daily": OM_DAILY, "hourly": OM_HOURLY, "forecast_days": 16,
+                "timezone": place.tz, "temperature_unit": "fahrenheit",
+                "wind_speed_unit": "mph", "models": model})
+            raw = ctx.json("https://api.open-meteo.com/v1/forecast?" + q)
+            daily, hourly = parse_openmeteo(raw)
+            return daily, hourly, raw.get("elevation")
+        daily, hourly, _ = at(place.lat, place.lon)
+        return daily, hourly
+    return fetch
+
+
+def fetch_ensemble(model):
+    def fetch(place, ctx):
+        def at(lat, lon):
+            q = urllib.parse.urlencode({
+                "latitude": f"{lat:.4f}", "longitude": f"{lon:.4f}",
+                "hourly": ENS_HOURLY, "forecast_days": 16, "timezone": place.tz,
+                "temperature_unit": "fahrenheit", "wind_speed_unit": "mph", "models": model})
+            raw = ctx.json("https://ensemble-api.open-meteo.com/v1/ensemble?" + q)
+            daily, hourly = parse_ensemble(raw)
+            return daily, hourly, raw.get("elevation")
+        daily, hourly, _ = at(place.lat, place.lon)
+        return daily, hourly
+    return fetch
+
+
+def fetch_nws(place, ctx):
+    if place.country_code and place.country_code not in NWS_COUNTRIES:
+        raise NotAvailableHere("US forecasts only")
+    try:
+        pts = ctx.json(f"https://api.weather.gov/points/{place.lat:.4f},{place.lon:.4f}")["properties"]
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            raise NotAvailableHere("US forecasts only") from None
+        raise
+    d = ctx.json(pts["forecast"])
+    h = ctx.json(pts["forecastHourly"])
+    # the hourly product carries a probability but no amount; the raw gridpoint
+    # is the only place NWS publishes quantitativePrecipitation
+    try:
+        qpf = parse_nws_grid_qpf(ctx.json(pts["forecastGridData"]), place.zone)
+    except Exception:  # noqa: BLE001 — an amount is a bonus, never worth losing NWS over
+        qpf = {}
+    return parse_nws_daily(d, place.zone), parse_nws_hourly(h, place.zone, qpf)
+
+
+def fetch_metno(place, ctx):
+    # MET Norway's terms: at most 4 decimals, and an identifying User-Agent
+    d = ctx.json("https://api.met.no/weatherapi/locationforecast/2.0/complete"
+                 f"?lat={place.lat:.4f}&lon={place.lon:.4f}")
+    return parse_metno(d, place.zone)
+
+
+_FORECA_IDS = {}
+_FORECA_LOCK = threading.Lock()
+
+
+def foreca_location_id(place, ctx):
+    key = place.cache_key()
+    with _FORECA_LOCK:
+        if key in _FORECA_IDS:
+            return _FORECA_IDS[key]
+    loc = ctx.browser_json(f"https://api.foreca.net/locations/{place.lon:.4f},{place.lat:.4f}.json?lang=en")
+    lid = str(loc["id"])
+    with _FORECA_LOCK:
+        _FORECA_IDS[key] = lid
+    return lid
+
+
+def fetch_foreca(place, ctx):
+    lid = foreca_location_id(place, ctx)
+    return parse_foreca(ctx.browser_json(f"https://api.foreca.net/data/daily/{lid}.json?dataset=full&lang=en"))
+
+
+# ----------------------------------------------------------------------------
+# registry
+# ----------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class Source:
+    id: str
+    name: str
+    short: str
+    note: str
+    fetch: Callable
+    link: Callable
+    opt_in: str | None = None   # "twc" / "foreca": off unless the host turns it on
+
+
+def _fixed(url):
+    return lambda place: url
+
+
+ENS_DOCS = "https://open-meteo.com/en/docs/ensemble-api"
+
+# Order matters: summarise_day() takes the condition phrase from the first
+# source that publishes one, deliberately weather.com -> Foreca -> NWS.
+SOURCES = (
+    Source("twc", "The Weather Channel", "weather.com", "Same forecast engine behind Weather Underground",
+           fetch_twc, lambda p: f"https://weather.com/weather/tenday/l/{p.lat:.3f},{p.lon:.3f}", opt_in="twc"),
+    Source("foreca", "Foreca", "Foreca", "Commercial forecaster behind MSN and Bing Weather — daily only",
+           fetch_foreca, _fixed("https://www.foreca.com/"), opt_in="foreca"),
+    Source("nws", "National Weather Service", "NWS / NOAA", "US only · 7-day forecast",
+           fetch_nws, lambda p: f"https://forecast.weather.gov/MapClick.php?lat={p.lat:.4f}&lon={p.lon:.4f}"),
+    Source("ecmwf_ens", "ECMWF ensemble (51 runs)", "ECMWF ENS",
+           "Share of 51 model runs that produce measurable daytime rain",
+           fetch_ensemble("ecmwf_ifs025"), _fixed(ENS_DOCS)),
+    Source("gefs", "GEFS ensemble (31 runs)", "GEFS",
+           "Share of 31 NOAA model runs that produce measurable daytime rain",
+           fetch_ensemble("gfs_seamless"), _fixed(ENS_DOCS)),
+    Source("icon_ens", "ICON ensemble (40 runs)", "ICON ENS",
+           "Share of 40 German (DWD) model runs that produce measurable daytime rain",
+           fetch_ensemble("icon_seamless"), _fixed(ENS_DOCS)),
+    Source("ecmwf", "ECMWF (European model)", "ECMWF", "via Open-Meteo",
+           fetch_openmeteo("ecmwf_ifs025"), _fixed("https://open-meteo.com/")),
+    Source("gfs", "GFS (NOAA global model)", "GFS", "via Open-Meteo",
+           fetch_openmeteo("gfs_seamless"), _fixed("https://open-meteo.com/")),
+    # No "best_match" blend row: it resolves to one of the models above and
+    # was a byte-identical duplicate that double-weighted it.
+    Source("gem", "GEM (Environment Canada)", "GEM", "via Open-Meteo",
+           fetch_openmeteo("gem_seamless"), _fixed("https://open-meteo.com/")),
+    Source("metno", "MET Norway (yr.no)", "yr.no", "Temperatures only — publishes no rain probability",
+           fetch_metno, _fixed("https://www.yr.no/")),
+)
+
+
+def enabled_sources(cfg):
+    out = []
+    for src in SOURCES:
+        if src.opt_in == "twc" and not (cfg.enable_twc and cfg.twc_key):
+            continue
+        if src.opt_in == "foreca" and not (cfg.enable_foreca and have_curl_cffi()):
+            continue
+        out.append(src)
+    return out
